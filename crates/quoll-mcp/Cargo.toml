@@ -1,0 +1,22 @@
+[package]
+name = "quoll-mcp"
+description = "Compact read-oriented MCP tools for Quoll"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+quoll-core.workspace = true
+quoll-engine.workspace = true
+quoll-graph.workspace = true
+quoll-policy.workspace = true
+quoll-detect.workspace = true
+quoll-report.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

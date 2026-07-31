@@ -52,6 +52,8 @@ impl Exit {
             | Error::MissingBinary { .. }
             | Error::Timeout { .. } => Exit::ScannerFailed,
             Error::Ai { .. } | Error::NoAiProvider => Exit::ModelFailed,
+            Error::Budget(_) => Exit::BudgetExceeded,
+            Error::DynamicValidation(_) => Exit::DynamicValidationViolation,
             Error::Policy(_) => Exit::InvalidConfig,
             Error::Io { .. } | Error::BareIo(_) | Error::Serde(_) | Error::Other(_) => {
                 Exit::Internal

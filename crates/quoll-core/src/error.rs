@@ -47,6 +47,12 @@ pub enum Error {
     #[error("no ai provider is configured; run `quoll doctor` for setup guidance")]
     NoAiProvider,
 
+    #[error("budget exhausted: {0}")]
+    Budget(String),
+
+    #[error("dynamic validation refused: {0}")]
+    DynamicValidation(String),
+
     #[error("operation timed out after {seconds}s: {what}")]
     Timeout { what: String, seconds: u64 },
 
@@ -98,6 +104,8 @@ impl Error {
                 | Error::MissingBinary { .. }
                 | Error::Ai { .. }
                 | Error::NoAiProvider
+                | Error::Budget(_)
+                | Error::DynamicValidation(_)
                 | Error::Timeout { .. }
         )
     }

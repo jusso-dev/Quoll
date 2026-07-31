@@ -151,7 +151,7 @@ calls. A repository with no qualifying hypotheses costs zero tokens.
 
 ## Status
 
-Pre-alpha. Seven of eleven crates are implemented; **387 unit tests pass** and the workspace
+Pre-alpha. **All eleven crates are implemented**; **440 unit tests pass** and the workspace
 is clippy-clean.
 
 | Crate | State | Contents |
@@ -163,21 +163,21 @@ is clippy-clean.
 | `quoll-detect` | **Implemented** | Language, framework, ORM, auth-library and CI-provider detection from manifests, file conventions and imports. |
 | `quoll-plugins` | **Implemented** | First-party adapters: Semgrep, Gitleaks, OSV-Scanner, Trivy, cargo-audit, Strix. |
 | `quoll-policy` | **Implemented** | YAML policy packs, four built in, and deterministic invariant evaluation against the graph. |
-| `quoll-engine` | Not started | Scan orchestration, finding normalisation, hypothesis correlation, and CI integration. |
-| `quoll-ai` | Not started | Provider adapters, role-based model routing, hard budgets, investigation caching. |
-| `quoll-report` | Not started | JSON, SARIF and Markdown output with source-location verification. |
-| `quoll-mcp` | Not started | Compact read-oriented MCP tools. |
+| `quoll-engine` | **Implemented** | Scan orchestration, finding normalisation, hypothesis correlation, suppressions, baselines, CI integration. |
+| `quoll-ai` | **Implemented** | Provider adapters (OpenAI-compatible, Ollama, command, mock), role routing, hard budgets, investigation caching. |
+| `quoll-report` | **Implemented** | JSON, SARIF and Markdown output with source-location verification. |
+| `quoll-mcp` | **Implemented** | Compact read-oriented MCP tools over stdio. |
 
 ### One gap worth stating plainly
 
 The policy engine judges `route`, `auth_guard` and `database_operation` nodes. The indexer
-does not produce them yet — it emits functions, files, imports and call sites, and the
-framework-aware pass that turns a Next.js `route.ts` export into a `route` node lands with
-`quoll-engine`.
+does not produce them yet — it emits functions, files, imports and call sites. A
+framework-aware pass that turns a Next.js `route.ts` export into a `route` node is still
+needed before policy findings appear on a graph built from a real app today.
 
-So policy evaluation is complete and tested against graphs containing those nodes, and
-returns nothing on a graph built today. `quoll policy list` and `quoll policy explain` work
-now; policy *findings* arrive when the pipeline is assembled.
+`quoll scan` / `ci` run the full pipeline (detect → index → plugins → policy → correlate →
+report). Policy evaluation is complete and tested against graphs that contain those nodes;
+on today's indexed graphs it contributes zero violations until the framework pass lands.
 
 ### What already works, end to end
 
@@ -249,15 +249,14 @@ for route in graph.nodes_of_kind(NodeKind::Route)? {
 | `quoll doctor` | **Works** — configuration, graph, state directory, grammars, scanner binaries |
 | `quoll plugins list` \| `doctor` | **Works** — lists six adapters and checks which binaries are installed |
 | `quoll policy list` \| `explain` | **Works** — shows which packs apply here, and why |
-| `quoll scan` \| `ci` \| `explain` \| `findings` | Pending `quoll-engine` |
-| `quoll investigate` | Pending `quoll-ai` |
-| `quoll validate` | Pending `quoll-plugins` |
-| `quoll export` | Pending `quoll-report` |
-| `quoll mcp` | Pending `quoll-mcp` |
+| `quoll scan` \| `ci` | **Works** — full pipeline; missing scanner binaries degrade coverage rather than fake a clean run |
+| `quoll explain` \| `findings` | **Works** — reads the last scan from `.quoll/last-scan.json` |
+| `quoll export` | **Works** — JSON / SARIF / Markdown from the last scan |
+| `quoll investigate` | **Works** when AI is configured (`--dry-run` always works) |
+| `quoll validate` | **Works** — target allowlist gate always runs; Strix when installed |
+| `quoll mcp` | **Works** — read-only MCP tools over stdio |
 
-A pending command names the crate it is waiting on and exits `70`, which no scan outcome
-uses. An unbuilt command and a broken one must never look the same, and a CI pipeline
-pointed at a pre-alpha build must fail loudly rather than report a clean scan.
+Exit code `70` remains reserved for not-implemented commands; nothing in this build uses it.
 
 ### Exit codes
 
@@ -477,11 +476,11 @@ no API key.
 - [x] Framework detection: Next.js App Router, Better Auth, Drizzle, Prisma, Express, Axum, Actix Web
 - [x] Policy packs and deterministic invariant evaluation
 - [x] Scanner adapters: Semgrep, Gitleaks, OSV-Scanner, Trivy, cargo-audit, Strix
-- [ ] Finding normalisation and deduplication into one schema
-- [ ] Hypothesis correlation
-- [ ] Model providers, role routing and hard budgets
-- [ ] JSON, SARIF and Markdown reporting with verified source locations
-- [ ] GitHub Actions integration and stable exit codes
+- [x] Finding normalisation and deduplication into one schema
+- [x] Hypothesis correlation
+- [x] Model providers, role routing and hard budgets
+- [x] JSON, SARIF and Markdown reporting with verified source locations
+- [x] GitHub Actions integration and stable exit codes
 
 **Explicitly out of scope for the MVP**
 

@@ -1,9 +1,16 @@
+pub mod ci;
 pub mod doctor;
+pub mod explain;
+pub mod export;
+pub mod findings;
 pub mod graph;
 pub mod init;
-pub mod pending;
+pub mod investigate;
+pub mod mcp;
 pub mod plugins;
 pub mod policy;
+pub mod scan;
+pub mod validate;
 
 use std::path::PathBuf;
 
@@ -62,60 +69,13 @@ pub async fn dispatch(cli: Cli, context: &Context) -> Result<Exit> {
         Command::Doctor => doctor::run(context),
         Command::Plugins(command) => plugins::run(context, &command).await,
         Command::Policy(command) => policy::run(context, &command),
-
-        // Implemented as far as the crate behind them exists. Each of these reports what
-        // is missing rather than failing with a generic message, because "not built yet"
-        // and "broken" must never look the same to a user.
-        Command::Scan(_) => Ok(pending::report(
-            context,
-            "scan",
-            "quoll-engine",
-            "orchestration, scanner adapters and hypothesis correlation",
-        )),
-        Command::Ci(_) => Ok(pending::report(
-            context,
-            "ci",
-            "quoll-engine",
-            "CI provider detection, base-ref resolution and SARIF output",
-        )),
-        Command::Explain(_) => Ok(pending::report(
-            context,
-            "explain",
-            "quoll-engine",
-            "stored findings and hypotheses to explain",
-        )),
-        Command::Investigate(_) => Ok(pending::report(
-            context,
-            "investigate",
-            "quoll-ai",
-            "model providers, role routing and token budgets",
-        )),
-        Command::Validate(_) => Ok(pending::report(
-            context,
-            "validate",
-            "quoll-engine",
-            "hypotheses to validate; the Strix adapter and its target guards are ready",
-        )),
-        Command::Findings(_) => Ok(pending::report(
-            context,
-            "findings",
-            "quoll-engine",
-            "finding normalisation and storage",
-        )),
-        Command::Export(args) => Ok(pending::report(
-            context,
-            "export",
-            "quoll-report",
-            &format!(
-                "the {} writer, and source-location verification for every reported line",
-                args.format.as_str()
-            ),
-        )),
-        Command::Mcp(_) => Ok(pending::report(
-            context,
-            "mcp",
-            "quoll-mcp",
-            "the MCP server and its read-oriented tools",
-        )),
+        Command::Scan(args) => scan::run(context, &args).await,
+        Command::Ci(args) => ci::run(context, &args).await,
+        Command::Explain(args) => explain::run(context, &args),
+        Command::Investigate(args) => investigate::run(context, &args).await,
+        Command::Validate(args) => validate::run(context, &args).await,
+        Command::Findings(command) => findings::run(context, &command),
+        Command::Export(args) => export::run(context, &args),
+        Command::Mcp(args) => mcp::run(context, &args),
     }
 }

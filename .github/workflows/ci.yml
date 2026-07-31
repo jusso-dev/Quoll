@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  # Example of running Quoll against itself once scanners are available on the runner.
+  # The binary always exits with a stable code (0/1/3/…); code 70 is reserved for
+  # not-implemented and must never appear on a complete build.
+  self-scan:
+    name: quoll ci (self)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build quoll
+        run: cargo build -p quoll-cli --release
+      - name: Run quoll ci
+        # Plugins without binaries are recorded as unavailable (coverage degraded),
+        # not as a green empty scan that pretends tools ran.
+        run: |
+          ./target/release/quoll ci --profile fast --sarif quoll.sarif || code=$?
+          code=${code:-0}
+          echo "exit=$code"
+          if [ "$code" -eq 70 ] || [ "$code" -eq 71 ]; then
+            echo "Quoll itself failed (exit $code)" >&2
+            exit 1
+          fi
+          # 0 clean, 1 findings above gate, 3 scanner failures — all valid outcomes
+          if [ "$code" -gt 7 ]; then
+            exit "$code"
+          fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quoll-sarif
+          path: quoll.sarif
+          if-no-files-found: ignore

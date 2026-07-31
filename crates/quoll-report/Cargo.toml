@@ -1,0 +1,20 @@
+[package]
+name = "quoll-report"
+description = "JSON, SARIF and Markdown reporting for Quoll, with source-location verification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+quoll-core.workspace = true
+quoll-plugin.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
