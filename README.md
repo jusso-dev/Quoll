@@ -1,4 +1,22 @@
-# Quoll
+<p align="center">
+  <img src="assets/quoll-logo.png" alt="Quoll" width="220">
+</p>
+
+<h1 align="center">Quoll</h1>
+
+<p align="center">
+  <strong>Security reasoning, not just security scanning.</strong><br>
+  Built in Australia, for engineers everywhere.
+</p>
+
+<p align="center">
+  <a href="#status"><img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/rust-1.82%2B-b7410e" alt="Rust 1.82+">
+  <img src="https://img.shields.io/badge/tests-194%20passing-brightgreen" alt="194 tests passing">
+</p>
+
+---
 
 A code security scanner that builds a graph of your repository first, and only then decides
 what to report.
@@ -36,6 +54,11 @@ never the thing that decides a vulnerability exists.
 ---
 
 ## Why another scanner
+
+![Quoll: evidence first, code intelligence, AI reasoning, optional validation](assets/quoll-banner.png)
+
+> The banner shows the target state. `quoll scan`, policy evaluation and AI investigation
+> are not implemented yet — see [Status](#status) for what runs today.
 
 Three problems with the current generation of tools:
 
