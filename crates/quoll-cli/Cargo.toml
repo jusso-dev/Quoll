@@ -17,6 +17,7 @@ quoll-core.workspace = true
 quoll-detect.workspace = true
 quoll-graph.workspace = true
 quoll-plugin.workspace = true
+quoll-plugins.workspace = true
 quoll-policy.workspace = true
 
 clap.workspace = true

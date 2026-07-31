@@ -15,11 +15,11 @@ pub async fn run(context: &Context, command: &PluginsCommand) -> Result<Exit> {
 
 /// The plugins available to this build.
 ///
-/// Built by the CLI rather than discovered at runtime: Quoll does not load dynamic
-/// libraries into its own process, so the set of first-party plugins is fixed at compile
-/// time and external plugins speak JSON over stdio instead.
+/// Fixed at compile time rather than discovered at runtime: Quoll does not load dynamic
+/// libraries into its own process, so first-party adapters are linked in and external
+/// plugins speak JSON over stdio instead.
 fn registry() -> Registry {
-    Registry::new()
+    quoll_plugins::registry()
 }
 
 fn list(context: &Context) -> Result<Exit> {
@@ -28,10 +28,6 @@ fn list(context: &Context) -> Result<Exit> {
 
     if registry.is_empty() {
         printer.warn("no scanner plugins are registered in this build");
-        printer.line("");
-        printer.line("  The plugin contract is implemented; the adapters are not.");
-        printer.line("  Semgrep, Gitleaks, OSV-Scanner and cargo-audit arrive with quoll-plugins.");
-        printer.line("  Run `quoll doctor` to see which of their binaries are already installed.");
         return Ok(Exit::Ok);
     }
 
@@ -45,12 +41,21 @@ fn list(context: &Context) -> Result<Exit> {
             .map(|capability| capability.as_str())
             .collect();
         printer.line(format!(
-            "  {} {}  {}",
+            "  {} {:<28} {}",
             pad(&manifest.id, width + 2),
             manifest.name,
-            printer.dim(&capabilities.join(", "))
+            printer.dim(&format!(
+                "{} · {}",
+                manifest.cost.as_str(),
+                capabilities.join(", ")
+            ))
         ));
     }
+    printer.line("");
+    printer.line(format!(
+        "  {}",
+        printer.dim("`quoll plugins doctor` checks which of their binaries are installed")
+    ));
     Ok(Exit::Ok)
 }
 
@@ -113,12 +118,15 @@ mod tests {
     }
 
     #[test]
-    fn listing_an_empty_registry_explains_itself_rather_than_failing() {
+    fn listing_shows_the_first_party_adapters() {
+        assert!(!registry().is_empty());
         assert_eq!(list(&context()).unwrap(), Exit::Ok);
     }
 
     #[tokio::test]
-    async fn doctor_on_an_empty_registry_succeeds() {
+    async fn doctor_reports_availability_without_failing_when_tools_are_missing() {
+        // A missing scanner is a degraded scan, not a broken installation, so the command
+        // still succeeds on a machine with none of them installed.
         assert_eq!(doctor(&context()).await.unwrap(), Exit::Ok);
     }
 }

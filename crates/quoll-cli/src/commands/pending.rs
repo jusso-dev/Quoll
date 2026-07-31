@@ -20,7 +20,7 @@ pub fn report(
     );
     eprintln!("  waiting on {}, which will provide {provides}.", printer.bold(crate_name));
     eprintln!();
-    eprintln!("  Working today: {}", printer.bold("init, graph, plugins, doctor"));
+    eprintln!("  Working today: {}", printer.bold("init, graph, plugins, policy, doctor"));
     eprintln!("  Progress:      https://github.com/jusso-dev/Quoll#roadmap");
     Exit::NotImplemented
 }

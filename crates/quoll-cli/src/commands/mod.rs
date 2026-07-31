@@ -93,8 +93,8 @@ pub async fn dispatch(cli: Cli, context: &Context) -> Result<Exit> {
         Command::Validate(_) => Ok(pending::report(
             context,
             "validate",
-            "quoll-plugins",
-            "the Strix dynamic validator adapter",
+            "quoll-engine",
+            "hypotheses to validate; the Strix adapter and its target guards are ready",
         )),
         Command::Findings(_) => Ok(pending::report(
             context,

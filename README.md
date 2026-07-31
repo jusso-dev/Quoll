@@ -13,7 +13,7 @@
   <a href="#status"><img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.82%2B-b7410e" alt="Rust 1.82+">
-  <img src="https://img.shields.io/badge/tests-290%20passing-brightgreen" alt="290 tests passing">
+  <img src="https://img.shields.io/badge/tests-387%20passing-brightgreen" alt="387 tests passing">
 </p>
 
 > The banner above shows the target state. `quoll scan`, policy evaluation and AI
@@ -151,7 +151,7 @@ calls. A repository with no qualifying hypotheses costs zero tokens.
 
 ## Status
 
-Pre-alpha. Six of eleven crates are implemented; **290 unit tests pass** and the workspace
+Pre-alpha. Seven of eleven crates are implemented; **387 unit tests pass** and the workspace
 is clippy-clean.
 
 | Crate | State | Contents |
@@ -161,7 +161,7 @@ is clippy-clean.
 | `quoll-plugin` | **Implemented** | The plugin contract: manifests, capability negotiation, scan context, registry and scheduling, plus the single choke point for subprocess execution. |
 | `quoll-graph` | **Implemented** | File discovery, tree-sitter indexing, the SQLite code graph, and bounded traversal. |
 | `quoll-detect` | **Implemented** | Language, framework, ORM, auth-library and CI-provider detection from manifests, file conventions and imports. |
-| `quoll-plugins` | Not started | First-party adapters: Semgrep, Gitleaks, OSV-Scanner, Trivy, cargo-audit, Strix. |
+| `quoll-plugins` | **Implemented** | First-party adapters: Semgrep, Gitleaks, OSV-Scanner, Trivy, cargo-audit, Strix. |
 | `quoll-policy` | **Implemented** | YAML policy packs, four built in, and deterministic invariant evaluation against the graph. |
 | `quoll-engine` | Not started | Scan orchestration, finding normalisation, hypothesis correlation, and CI integration. |
 | `quoll-ai` | Not started | Provider adapters, role-based model routing, hard budgets, investigation caching. |
@@ -247,7 +247,7 @@ for route in graph.nodes_of_kind(NodeKind::Route)? {
 | `quoll graph update` | **Works** — indexes only what changed |
 | `quoll graph stats` | **Works** — node, edge and file counts by kind |
 | `quoll doctor` | **Works** — configuration, graph, state directory, grammars, scanner binaries |
-| `quoll plugins list` \| `doctor` | **Works** — reports an empty registry until the adapters land |
+| `quoll plugins list` \| `doctor` | **Works** — lists six adapters and checks which binaries are installed |
 | `quoll policy list` \| `explain` | **Works** — shows which packs apply here, and why |
 | `quoll scan` \| `ci` \| `explain` \| `findings` | Pending `quoll-engine` |
 | `quoll investigate` | Pending `quoll-ai` |
@@ -461,7 +461,7 @@ cargo clippy --workspace --all-targets
 cargo install --path crates/quoll-cli
 ```
 
-Expect 290 passing unit tests and no clippy warnings. The tests need no network access and
+Expect 387 passing unit tests and no clippy warnings. The tests need no network access and
 no API key.
 
 ---
@@ -476,7 +476,7 @@ no API key.
 - [x] `quoll-cli` — the binary, with `init`, `graph`, `plugins` and `doctor` working
 - [x] Framework detection: Next.js App Router, Better Auth, Drizzle, Prisma, Express, Axum, Actix Web
 - [x] Policy packs and deterministic invariant evaluation
-- [ ] Scanner adapters: Semgrep, Gitleaks, OSV-Scanner, cargo-audit
+- [x] Scanner adapters: Semgrep, Gitleaks, OSV-Scanner, Trivy, cargo-audit, Strix
 - [ ] Finding normalisation and deduplication into one schema
 - [ ] Hypothesis correlation
 - [ ] Model providers, role routing and hard budgets
