@@ -12,9 +12,12 @@ homepage = "https://github.com/jusso-dev/Quoll"
 authors = ["The Quoll Authors"]
 
 [workspace.dependencies]
-# Crate map. The specification names thirteen crates; this workspace consolidates them
-# into ten, because several of the split boundaries would have separated code that always
-# changes together and never has an independent consumer:
+# Crate map. The specification names thirteen crates; this workspace has eleven, because
+# several of the split boundaries would have separated code that always changes together
+# and never has an independent consumer:
+#
+# quoll-cli is absent from the list below because nothing depends on it — it is the
+# binary, and it holds no business logic.
 #
 #   spec crate          lives in            why
 #   ------------------  ------------------  --------------------------------------------

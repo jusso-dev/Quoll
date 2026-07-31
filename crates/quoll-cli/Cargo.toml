@@ -1,0 +1,26 @@
+[package]
+name = "quoll-cli"
+description = "Command line interface for Quoll"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "quoll"
+path = "src/main.rs"
+
+[dependencies]
+quoll-core.workspace = true
+quoll-graph.workspace = true
+quoll-plugin.workspace = true
+
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

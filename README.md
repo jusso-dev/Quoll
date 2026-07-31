@@ -13,9 +13,9 @@ A language model is invited only after that, and only for the hypotheses that cl
 confidence threshold. It reasons about evidence Quoll gathered deterministically; it is
 never the thing that decides a vulnerability exists.
 
-> **Status: pre-alpha.** The domain model, plugin contract and code graph are implemented
-> and tested. There is no runnable binary yet. See [Status](#status) for exactly what
-> exists.
+> **Status: pre-alpha.** The domain model, plugin contract, code graph and CLI are
+> implemented and tested. `quoll graph build` indexes a real repository today; `quoll scan`
+> does not exist yet. See [Status](#status) for exactly what works.
 
 ---
 
@@ -24,6 +24,7 @@ never the thing that decides a vulnerability exists.
 - [Why another scanner](#why-another-scanner)
 - [How it works](#how-it-works)
 - [Status](#status)
+- [Commands](#commands)
 - [Architecture](#architecture)
 - [The code graph](#the-code-graph)
 - [Configuration](#configuration)
@@ -126,11 +127,12 @@ calls. A repository with no qualifying hypotheses costs zero tokens.
 
 ## Status
 
-Pre-alpha. Three of ten crates are implemented; **162 unit tests pass** and the workspace is
-clippy-clean.
+Pre-alpha. Four of eleven crates are implemented; **194 unit tests pass** and the workspace
+is clippy-clean.
 
 | Crate | State | Contents |
 |---|---|---|
+| `quoll-cli` | **Implemented** | The `quoll` binary: argument parsing, terminal output and exit-code mapping. Holds no business logic. |
 | `quoll-core` | **Implemented** | Domain vocabulary: severity, confidence, evidence, findings, hypotheses, locations, tech stack, and the `quoll.toml` loader. Depends on no scanner, no AI provider and no storage engine. |
 | `quoll-plugin` | **Implemented** | The plugin contract: manifests, capability negotiation, scan context, registry and scheduling, plus the single choke point for subprocess execution. |
 | `quoll-graph` | **Implemented** | File discovery, tree-sitter indexing, the SQLite code graph, and bounded traversal. |
@@ -142,26 +144,106 @@ clippy-clean.
 | `quoll-report` | Not started | JSON, SARIF and Markdown output with source-location verification. |
 | `quoll-mcp` | Not started | Compact read-oriented MCP tools. |
 
-There is **no `quoll` binary yet**. `quoll-cli` is the next crate to be written.
-
 ### What already works, end to end
+
+```console
+$ cargo install --path crates/quoll-cli
+$ cd ~/code/my-app
+
+$ quoll init
+✓ wrote /Users/me/code/my-app/quoll.toml
+  profile                balanced
+  graph                  .quoll/graph.db
+  ai                     disabled
+
+$ quoll graph build
+Building /Users/me/code/my-app
+
+Files
+  discovered             412
+  parsed                 388
+  unchanged              0
+  no grammar             24 (recorded, not parsed)
+
+Written this run
+  symbols                1841
+  nodes                  2277
+  edges                  4130
+  elapsed                2.4s
+
+Not indexed
+  over size limit        3
+  binary                 11
+  ambiguous calls        207 (no edge written)
+✓ graph at /Users/me/code/my-app/.quoll/graph.db
+
+$ quoll graph update
+Files
+  discovered             412
+  parsed                 2
+  unchanged              410
+```
+
+Re-running against an unchanged tree reparses nothing: file hashes are compared first, and
+only files whose contents changed are handed to tree-sitter.
+
+The same thing from Rust:
 
 ```rust
 use quoll_graph::{Graph, GraphOps, Indexer, NodeKind, Walker};
 
 let mut graph = Graph::open(".quoll/graph.db")?;
 let report = Indexer::new(Walker::new(".")).index(&mut graph, "scan-1")?;
-
 println!("{}", report.summary());
-// 412 files (37 parsed, 375 unchanged), 1204 nodes, 2310 edges
 
 for route in graph.nodes_of_kind(NodeKind::Route)? {
     println!("{} at {}", route.name, route.location_label());
 }
 ```
 
-Re-running against an unchanged tree reparses nothing: file hashes are compared first, and
-only files whose contents changed are handed to tree-sitter.
+---
+
+## Commands
+
+| Command | State |
+|---|---|
+| `quoll init` | **Works** — writes a `quoll.toml` generated from the defaults |
+| `quoll graph build` | **Works** — indexes from scratch |
+| `quoll graph update` | **Works** — indexes only what changed |
+| `quoll graph stats` | **Works** — node, edge and file counts by kind |
+| `quoll doctor` | **Works** — configuration, graph, state directory, grammars, scanner binaries |
+| `quoll plugins list` \| `doctor` | **Works** — reports an empty registry until the adapters land |
+| `quoll scan` \| `ci` \| `explain` \| `findings` | Pending `quoll-engine` |
+| `quoll investigate` | Pending `quoll-ai` |
+| `quoll validate` | Pending `quoll-plugins` |
+| `quoll export` | Pending `quoll-report` |
+| `quoll policy` | Pending `quoll-policy` |
+| `quoll mcp` | Pending `quoll-mcp` |
+
+A pending command names the crate it is waiting on and exits `70`, which no scan outcome
+uses. An unbuilt command and a broken one must never look the same, and a CI pipeline
+pointed at a pre-alpha build must fail loudly rather than report a clean scan.
+
+### Exit codes
+
+These are a public interface. Values are fixed and are never reassigned.
+
+| Code | Meaning |
+|---|---|
+| `0` | Policy passed |
+| `1` | Findings at or above the severity gate |
+| `2` | Invalid configuration |
+| `3` | An external scanner failed or timed out |
+| `4` | Graph indexing failed |
+| `5` | A required model invocation failed |
+| `6` | A token, call or byte budget was exhausted |
+| `7` | Dynamic validation was requested against a forbidden target |
+| `70` | The command is not implemented in this build |
+| `71` | Internal error |
+
+Global flags — `-C/--path`, `--config`, `-q/--quiet`, `-v/--verbose`, `--no-color` — work
+before or after the subcommand. Logs go to stderr; stdout is reserved for results.
+`RUST_LOG` overrides `--verbose`.
 
 ---
 
@@ -173,6 +255,7 @@ A Cargo workspace on stable Rust (MSRV 1.82), resolver 2.
 quoll/
 ├── Cargo.toml            workspace manifest and the crate map
 └── crates/
+    ├── quoll-cli/        the `quoll` binary: parsing, output, exit codes
     ├── quoll-core/       domain vocabulary, configuration, errors
     ├── quoll-plugin/     plugin contract, process execution, registry
     ├── quoll-graph/      walk · parse · store · query
@@ -188,6 +271,10 @@ quoll/
 The dependency direction is strict: `quoll-core` depends on nothing in the workspace, and
 `quoll-plugin` depends only on `quoll-core`. Adding Semgrep, CodeQL or a tool that does not
 exist yet requires no change to the orchestrator.
+
+`quoll-cli` holds no business logic. Anything that decides what a scan *means* lives in a
+library crate, so the same behaviour is reachable from the MCP server and from tests
+without spawning a subprocess.
 
 The crate list consolidates several crates named in the design specification —
 configuration lives in `quoll-core`, and the runner, normaliser, hypothesis engine and CI
@@ -334,9 +421,12 @@ the bundled library.
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets
+
+# Install the binary
+cargo install --path crates/quoll-cli
 ```
 
-Expect 162 passing unit tests and no clippy warnings. The tests need no network access and
+Expect 194 passing unit tests and no clippy warnings. The tests need no network access and
 no API key.
 
 ---
@@ -348,7 +438,7 @@ no API key.
 - [x] Domain vocabulary and configuration
 - [x] Plugin contract, registry and shell-free process execution
 - [x] Code graph: walk, incremental tree-sitter indexing, SQLite storage, bounded traversal
-- [ ] `quoll-cli` — so there is a binary
+- [x] `quoll-cli` — the binary, with `init`, `graph`, `plugins` and `doctor` working
 - [ ] Framework detection: Next.js App Router, Better Auth, Drizzle, Prisma, Express, Axum, Actix Web
 - [ ] Policy packs and deterministic invariant evaluation
 - [ ] Scanner adapters: Semgrep, Gitleaks, OSV-Scanner, cargo-audit
