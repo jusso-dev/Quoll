@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/quoll-logo.png" alt="Quoll" width="220">
+  <img src="assets/quoll-banner.png" alt="Quoll — security reasoning, not just security scanning. Evidence first, code intelligence, AI reasoning, optional validation. Built in Australia, for engineers everywhere.">
 </p>
 
 <h1 align="center">Quoll</h1>
@@ -15,6 +15,9 @@
   <img src="https://img.shields.io/badge/rust-1.82%2B-b7410e" alt="Rust 1.82+">
   <img src="https://img.shields.io/badge/tests-194%20passing-brightgreen" alt="194 tests passing">
 </p>
+
+> The banner above shows the target state. `quoll scan`, policy evaluation and AI
+> investigation are not implemented yet — see [Status](#status) for what runs today.
 
 ---
 
@@ -55,10 +58,7 @@ never the thing that decides a vulnerability exists.
 
 ## Why another scanner
 
-![Quoll: evidence first, code intelligence, AI reasoning, optional validation](assets/quoll-banner.png)
-
-> The banner shows the target state. `quoll scan`, policy evaluation and AI investigation
-> are not implemented yet — see [Status](#status) for what runs today.
+<img src="assets/quoll-logo.png" alt="" align="right" width="180">
 
 Three problems with the current generation of tools:
 
