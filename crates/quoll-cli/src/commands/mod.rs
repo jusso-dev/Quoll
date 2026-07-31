@@ -3,6 +3,7 @@ pub mod graph;
 pub mod init;
 pub mod pending;
 pub mod plugins;
+pub mod policy;
 
 use std::path::PathBuf;
 
@@ -60,6 +61,7 @@ pub async fn dispatch(cli: Cli, context: &Context) -> Result<Exit> {
         Command::Graph(command) => graph::run(context, &command),
         Command::Doctor => doctor::run(context),
         Command::Plugins(command) => plugins::run(context, &command).await,
+        Command::Policy(command) => policy::run(context, &command),
 
         // Implemented as far as the crate behind them exists. Each of these reports what
         // is missing rather than failing with a generic message, because "not built yet"
@@ -108,12 +110,6 @@ pub async fn dispatch(cli: Cli, context: &Context) -> Result<Exit> {
                 "the {} writer, and source-location verification for every reported line",
                 args.format.as_str()
             ),
-        )),
-        Command::Policy(_) => Ok(pending::report(
-            context,
-            "policy",
-            "quoll-policy",
-            "policy pack parsing and invariant evaluation",
         )),
         Command::Mcp(_) => Ok(pending::report(
             context,

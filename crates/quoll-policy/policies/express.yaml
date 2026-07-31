@@ -1,0 +1,44 @@
+schema_version: 1
+id: express
+version: 1.0.0
+description: >-
+  Invariants for Express applications. Express applies middleware in registration order, so
+  a route is guarded when an authentication middleware runs before its handler.
+
+applies_when:
+  any:
+    - framework: express
+    - framework: fastify
+
+invariants:
+  - id: authenticated-mutation
+    title: State-changing routes require authentication middleware
+    severity: high
+    description: >-
+      A mutating route registered without authentication middleware in front of it is open.
+      Registering the middleware after the route has no effect, because Express matches in
+      registration order.
+    remediation: >-
+      Register the authentication middleware before the route, or pass it as a
+      route-specific handler argument.
+    applies_to:
+      node_kind: route
+      methods: [POST, PUT, PATCH, DELETE]
+    requires:
+      edge: guarded_by
+      target_kind: auth_guard
+      describe: authentication middleware
+
+  - id: routes-validate-input
+    title: State-changing routes should validate their request body
+    severity: medium
+    description: >-
+      An unvalidated body reaches the database with whatever shape the caller chose. This is
+      the precondition for mass assignment and for most injection findings.
+    remediation: Parse the body through a schema before using it.
+    applies_to:
+      node_kind: route
+      methods: [POST, PUT, PATCH]
+    requires:
+      attribute: validates_input
+      describe: request body validation

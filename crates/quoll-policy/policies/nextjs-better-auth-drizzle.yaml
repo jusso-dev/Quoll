@@ -1,0 +1,70 @@
+schema_version: 1
+id: nextjs-better-auth-drizzle
+version: 1.0.0
+description: >-
+  Invariants specific to the Next.js App Router, Better Auth and Drizzle combination. These
+  need all three to be present, because each one depends on knowing how the other two
+  express a control.
+
+applies_when:
+  all:
+    - framework: nextjs-app-router
+    - auth: better-auth
+    - orm: drizzle
+
+invariants:
+  - id: authenticated-mutation
+    title: State-changing routes require a Better Auth session
+    severity: high
+    description: >-
+      Better Auth exposes the session through its own helper. A mutating handler that never
+      calls it has no caller identity to act on.
+    remediation: >-
+      Call `auth.api.getSession({ headers })` at the top of the handler and return 401 when
+      it yields nothing.
+    applies_to:
+      node_kind: route
+      methods: [POST, PUT, PATCH, DELETE]
+    requires:
+      edge: guarded_by
+      target_kind: auth_guard
+      describe: a Better Auth session check
+
+  - id: tenant-scoped-write
+    title: Tenant-owned writes must enforce tenant scope
+    severity: high
+    description: >-
+      A Drizzle `update` or `delete` whose where clause does not mention the tenant column
+      operates across every tenant. The row identifier alone is not a boundary: identifiers
+      are guessable, and a caller from one organisation can name a row from another.
+    remediation: >-
+      Add the tenant column to the where clause alongside the row identifier, so the write
+      is scoped by both.
+    applies_to:
+      node_kind: database_operation
+      operations: [update, delete]
+    requires_any:
+      - predicate_field: organisation_id
+        describe: a filter on `organisation_id`
+      - predicate_field: organization_id
+        describe: a filter on `organization_id`
+      - predicate_field: tenant_id
+        describe: a filter on `tenant_id`
+
+  - id: tenant-scoped-read
+    title: Tenant-owned reads should enforce tenant scope
+    severity: medium
+    description: >-
+      A select that ignores the tenant column returns other tenants' rows. This is rated
+      below the write case because the blast radius is disclosure rather than modification.
+    remediation: Add the tenant column to the where clause.
+    applies_to:
+      node_kind: database_operation
+      operations: [select]
+    requires_any:
+      - predicate_field: organisation_id
+        describe: a filter on `organisation_id`
+      - predicate_field: organization_id
+        describe: a filter on `organization_id`
+      - predicate_field: tenant_id
+        describe: a filter on `tenant_id`

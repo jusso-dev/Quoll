@@ -1,0 +1,43 @@
+schema_version: 1
+id: axum
+version: 1.0.0
+description: >-
+  Invariants for Axum services. Axum composes authentication from tower layers and
+  extractors, so a handler is guarded when a layer or an extractor establishes identity
+  before the handler body runs.
+
+applies_when:
+  all:
+    - framework: axum
+
+invariants:
+  - id: authenticated-mutation
+    title: State-changing handlers require authentication
+    severity: high
+    description: >-
+      A handler registered for a mutating method with no authentication layer or extractor
+      in front of it is reachable by anyone who can reach the socket.
+    remediation: >-
+      Add the authentication layer to the router, or take an extractor that rejects
+      unauthenticated requests before the handler body runs.
+    applies_to:
+      node_kind: route
+      methods: [POST, PUT, PATCH, DELETE]
+    requires:
+      edge: guarded_by
+      target_kind: auth_guard
+      describe: an authentication layer or extractor
+
+  - id: mutation-runs-authorisation
+    title: State-changing handlers should check authorisation
+    severity: medium
+    description: >-
+      Authentication establishes identity; it does not decide permission. A mutating handler
+      that never consults a permission is one role change away from a privilege escalation.
+    remediation: Check the caller's permission for the specific resource being modified.
+    applies_to:
+      node_kind: route
+      methods: [POST, PUT, PATCH, DELETE]
+    requires:
+      edge: authorises
+      describe: an authorisation check

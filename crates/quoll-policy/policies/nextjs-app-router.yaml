@@ -1,0 +1,61 @@
+schema_version: 1
+id: nextjs-app-router
+version: 1.0.0
+description: >-
+  Baseline expectations for a Next.js App Router application. These hold whatever auth
+  library or ORM is in use, so they apply as soon as the App Router is detected.
+
+applies_when:
+  all:
+    - framework: nextjs-app-router
+
+invariants:
+  - id: authenticated-mutation
+    title: State-changing route handlers require authentication
+    severity: high
+    description: >-
+      A route handler that creates, modifies or deletes data must establish who the caller
+      is before doing so. In the App Router every exported HTTP method in a route.ts file is
+      publicly reachable by default — there is no framework-level gate to fall back on.
+    remediation: >-
+      Call your session helper at the top of the handler and return 401 when it yields no
+      session, or wrap the handler in middleware that does.
+    applies_to:
+      node_kind: route
+      methods: [POST, PUT, PATCH, DELETE]
+    requires:
+      edge: guarded_by
+      target_kind: auth_guard
+      describe: an authentication check
+
+  - id: admin-route-authorisation
+    title: Admin routes require an authorisation check, not just authentication
+    severity: critical
+    description: >-
+      Knowing who the caller is does not decide what they may do. A route under an admin
+      path that only authenticates is reachable by every signed-in user.
+    remediation: >-
+      Check the caller's role or permission after establishing the session, and return 403
+      when it is insufficient.
+    applies_to:
+      node_kind: route
+      path_contains: /admin/
+    requires:
+      edge: guarded_by
+      target_kind: authorisation_guard
+      describe: an authorisation check
+
+  - id: server-action-guarded
+    title: Server Actions require authentication
+    severity: high
+    description: >-
+      A Server Action is a public HTTP endpoint with a generated name. Being unexported from
+      a page is not a security boundary.
+    remediation: Establish the session inside the action before it touches data.
+    applies_to:
+      node_kind: route
+      name_contains: "use server"
+    requires:
+      edge: guarded_by
+      target_kind: auth_guard
+      describe: an authentication check

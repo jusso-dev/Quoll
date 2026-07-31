@@ -1,6 +1,6 @@
 [package]
-name = "quoll-cli"
-description = "Command line interface for Quoll"
+name = "quoll-policy"
+description = "YAML policy packs and deterministic invariant evaluation for Quoll"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,21 +8,15 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "quoll"
-path = "src/main.rs"
-
 [dependencies]
 quoll-core.workspace = true
 quoll-detect.workspace = true
 quoll-graph.workspace = true
-quoll-plugin.workspace = true
-quoll-policy.workspace = true
 
-clap.workspace = true
-tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

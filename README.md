@@ -13,7 +13,7 @@
   <a href="#status"><img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.82%2B-b7410e" alt="Rust 1.82+">
-  <img src="https://img.shields.io/badge/tests-240%20passing-brightgreen" alt="240 tests passing">
+  <img src="https://img.shields.io/badge/tests-290%20passing-brightgreen" alt="290 tests passing">
 </p>
 
 > The banner above shows the target state. `quoll scan`, policy evaluation and AI
@@ -34,9 +34,10 @@ A language model is invited only after that, and only for the hypotheses that cl
 confidence threshold. It reasons about evidence Quoll gathered deterministically; it is
 never the thing that decides a vulnerability exists.
 
-> **Status: pre-alpha.** The domain model, plugin contract, code graph and CLI are
-> implemented and tested. `quoll graph build` indexes a real repository today; `quoll scan`
-> does not exist yet. See [Status](#status) for exactly what works.
+> **Status: pre-alpha.** The domain model, plugin contract, code graph, stack detection,
+> policy engine and CLI are implemented and tested. `quoll graph build` indexes a real
+> repository today; `quoll scan` does not exist yet. See [Status](#status) for exactly what
+> works.
 
 ---
 
@@ -150,7 +151,7 @@ calls. A repository with no qualifying hypotheses costs zero tokens.
 
 ## Status
 
-Pre-alpha. Five of eleven crates are implemented; **240 unit tests pass** and the workspace
+Pre-alpha. Six of eleven crates are implemented; **290 unit tests pass** and the workspace
 is clippy-clean.
 
 | Crate | State | Contents |
@@ -161,11 +162,22 @@ is clippy-clean.
 | `quoll-graph` | **Implemented** | File discovery, tree-sitter indexing, the SQLite code graph, and bounded traversal. |
 | `quoll-detect` | **Implemented** | Language, framework, ORM, auth-library and CI-provider detection from manifests, file conventions and imports. |
 | `quoll-plugins` | Not started | First-party adapters: Semgrep, Gitleaks, OSV-Scanner, Trivy, cargo-audit, Strix. |
-| `quoll-policy` | Not started | YAML policy packs and deterministic invariant evaluation. |
+| `quoll-policy` | **Implemented** | YAML policy packs, four built in, and deterministic invariant evaluation against the graph. |
 | `quoll-engine` | Not started | Scan orchestration, finding normalisation, hypothesis correlation, and CI integration. |
 | `quoll-ai` | Not started | Provider adapters, role-based model routing, hard budgets, investigation caching. |
 | `quoll-report` | Not started | JSON, SARIF and Markdown output with source-location verification. |
 | `quoll-mcp` | Not started | Compact read-oriented MCP tools. |
+
+### One gap worth stating plainly
+
+The policy engine judges `route`, `auth_guard` and `database_operation` nodes. The indexer
+does not produce them yet — it emits functions, files, imports and call sites, and the
+framework-aware pass that turns a Next.js `route.ts` export into a `route` node lands with
+`quoll-engine`.
+
+So policy evaluation is complete and tested against graphs containing those nodes, and
+returns nothing on a graph built today. `quoll policy list` and `quoll policy explain` work
+now; policy *findings* arrive when the pipeline is assembled.
 
 ### What already works, end to end
 
@@ -236,11 +248,11 @@ for route in graph.nodes_of_kind(NodeKind::Route)? {
 | `quoll graph stats` | **Works** — node, edge and file counts by kind |
 | `quoll doctor` | **Works** — configuration, graph, state directory, grammars, scanner binaries |
 | `quoll plugins list` \| `doctor` | **Works** — reports an empty registry until the adapters land |
+| `quoll policy list` \| `explain` | **Works** — shows which packs apply here, and why |
 | `quoll scan` \| `ci` \| `explain` \| `findings` | Pending `quoll-engine` |
 | `quoll investigate` | Pending `quoll-ai` |
 | `quoll validate` | Pending `quoll-plugins` |
 | `quoll export` | Pending `quoll-report` |
-| `quoll policy` | Pending `quoll-policy` |
 | `quoll mcp` | Pending `quoll-mcp` |
 
 A pending command names the crate it is waiting on and exits `70`, which no scan outcome
@@ -449,7 +461,7 @@ cargo clippy --workspace --all-targets
 cargo install --path crates/quoll-cli
 ```
 
-Expect 194 passing unit tests and no clippy warnings. The tests need no network access and
+Expect 290 passing unit tests and no clippy warnings. The tests need no network access and
 no API key.
 
 ---
@@ -463,7 +475,7 @@ no API key.
 - [x] Code graph: walk, incremental tree-sitter indexing, SQLite storage, bounded traversal
 - [x] `quoll-cli` — the binary, with `init`, `graph`, `plugins` and `doctor` working
 - [x] Framework detection: Next.js App Router, Better Auth, Drizzle, Prisma, Express, Axum, Actix Web
-- [ ] Policy packs and deterministic invariant evaluation
+- [x] Policy packs and deterministic invariant evaluation
 - [ ] Scanner adapters: Semgrep, Gitleaks, OSV-Scanner, cargo-audit
 - [ ] Finding normalisation and deduplication into one schema
 - [ ] Hypothesis correlation
