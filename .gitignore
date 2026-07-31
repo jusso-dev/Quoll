@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+
+# Quoll's own state directory, written into whatever repository it scans — including this
+# one when Quoll is run against itself.
+.quoll/
+
+.DS_Store

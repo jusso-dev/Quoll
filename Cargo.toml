@@ -1,0 +1,104 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/jusso-dev/Quoll"
+homepage = "https://github.com/jusso-dev/Quoll"
+authors = ["The Quoll Authors"]
+
+[workspace.dependencies]
+# Crate map. The specification names thirteen crates; this workspace consolidates them
+# into ten, because several of the split boundaries would have separated code that always
+# changes together and never has an independent consumer:
+#
+#   spec crate          lives in            why
+#   ------------------  ------------------  --------------------------------------------
+#   quoll-config        quoll-core::config  every crate reads config; a separate crate
+#                                           would make quoll-core depend on it anyway
+#   quoll-discovery     quoll-detect        renamed only
+#   quoll-plugin-sdk    quoll-plugin        renamed only
+#   quoll-runner        quoll-engine        subprocess execution is in quoll-plugin::exec;
+#   quoll-normalize     quoll-engine        what remains is orchestration, and normalising
+#   quoll-hypothesis    quoll-engine        then correlating is one pipeline, not three
+#   quoll-agent         quoll-ai            renamed only
+#   quoll-ci            quoll-engine::ci    CI detection, base/head resolution and changed-
+#                                           file selection are scan scoping; the exit-code
+#                                           mapping they feed belongs to quoll-cli
+#
+# quoll-plugins is new: it holds the first-party scanner adapters, kept apart from
+# quoll-plugin so that the contract has no dependency on any tool that implements it.
+quoll-core = { path = "crates/quoll-core", version = "0.1.0" }
+quoll-detect = { path = "crates/quoll-detect", version = "0.1.0" }
+quoll-graph = { path = "crates/quoll-graph", version = "0.1.0" }
+quoll-plugin = { path = "crates/quoll-plugin", version = "0.1.0" }
+quoll-plugins = { path = "crates/quoll-plugins", version = "0.1.0" }
+quoll-policy = { path = "crates/quoll-policy", version = "0.1.0" }
+quoll-engine = { path = "crates/quoll-engine", version = "0.1.0" }
+quoll-ai = { path = "crates/quoll-ai", version = "0.1.0" }
+quoll-report = { path = "crates/quoll-report", version = "0.1.0" }
+quoll-mcp = { path = "crates/quoll-mcp", version = "0.1.0" }
+
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+futures = "0.3"
+gix = { version = "0.86", default-features = false, features = ["max-performance-safe"] }
+globset = "0.4"
+ignore = "0.4"
+indexmap = { version = "2", features = ["serde"] }
+petgraph = "0.8"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+    "charset",
+    "http2",
+] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "macros"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "fs",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tree-sitter = "0.26"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-php = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-ruby = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+walkdir = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dist]
+inherits = "release"
