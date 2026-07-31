@@ -519,6 +519,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "quoll-core",
+ "quoll-detect",
  "quoll-graph",
  "quoll-plugin",
  "tempfile",
@@ -537,6 +538,19 @@ dependencies = [
  "sha2",
  "thiserror",
  "time",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "quoll-detect"
+version = "0.1.0"
+dependencies = [
+ "quoll-core",
+ "quoll-graph",
+ "serde",
+ "serde_json",
+ "tempfile",
  "toml",
  "tracing",
 ]

@@ -1,5 +1,6 @@
 use quoll_core::{Language, Result};
-use quoll_graph::{Graph, GraphOps};
+use quoll_detect::{Detector, Role};
+use quoll_graph::{Graph, GraphOps, Walker};
 
 use crate::commands::Context;
 use crate::exit::Exit;
@@ -82,6 +83,8 @@ pub fn run(context: &Context) -> Result<Exit> {
         ));
     }
 
+    print_stack(context);
+
     let broken = checks.iter().filter(|c| c.status == Status::Broken).count();
     printer.line("");
     if broken == 0 {
@@ -90,6 +93,79 @@ pub fn run(context: &Context) -> Result<Exit> {
     } else {
         printer.warn(format!("{broken} check(s) failed"));
         Ok(Exit::InvalidConfig)
+    }
+}
+
+/// Show what Quoll believes this repository is built on, and why.
+///
+/// Rendered as part of `doctor` rather than behind its own command: the question a user
+/// actually has is "does Quoll understand my project", and the answer is only useful next
+/// to the evidence that produced it.
+fn print_stack(context: &Context) {
+    let printer = &context.printer;
+    let config = match context.config() {
+        Ok(config) => config,
+        Err(_) => return,
+    };
+
+    let files = match Walker::from_config(&config).discover() {
+        Ok(discovery) => discovery.files,
+        Err(err) => {
+            printer.heading("Stack");
+            printer.warn(format!("could not walk the repository: {err}"));
+            return;
+        }
+    };
+    let detection = match Detector::from_config(&config).detect(&files) {
+        Ok(detection) => detection,
+        Err(err) => {
+            printer.heading("Stack");
+            printer.warn(format!("detection failed: {err}"));
+            return;
+        }
+    };
+
+    printer.heading("Stack");
+    if detection.components.is_empty() {
+        printer.line(format!(
+            "  {}",
+            printer.dim("nothing recognised — policy packs will not apply")
+        ));
+        return;
+    }
+
+    for role in [
+        Role::Framework,
+        Role::Auth,
+        Role::Orm,
+        Role::Runtime,
+        Role::Library,
+    ] {
+        for component in detection.with_role(role) {
+            let version = component
+                .version
+                .as_deref()
+                .map(|v| format!(" {v}"))
+                .unwrap_or_default();
+            printer.line(format!(
+                "  {:<10} {}{}  {}",
+                printer.dim(role.as_str()),
+                component.name,
+                version,
+                printer.dim(&format!("{}%", component.confidence.percent()))
+            ));
+            // The evidence is the point. A detection nobody can audit is a guess.
+            for reason in component.evidence.iter().take(2) {
+                printer.line(format!("             {}", printer.dim(reason)));
+            }
+        }
+    }
+
+    if detection.imports_truncated {
+        printer.line(format!(
+            "  {}",
+            printer.dim("import scan hit its file cap; absence is not evidence of absence")
+        ));
     }
 }
 

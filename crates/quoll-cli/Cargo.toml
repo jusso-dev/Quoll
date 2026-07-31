@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 quoll-core.workspace = true
+quoll-detect.workspace = true
 quoll-graph.workspace = true
 quoll-plugin.workspace = true
 

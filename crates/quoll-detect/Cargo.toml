@@ -1,0 +1,24 @@
+[package]
+name = "quoll-detect"
+description = "Framework, ORM, auth-library and CI-provider detection for Quoll"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+quoll-core.workspace = true
+# For Walker::read and Parsers. Detection reuses the walker's path-containment guard
+# rather than reimplementing it, and reuses the tree-sitter import extraction rather than
+# pattern-matching source text.
+quoll-graph.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

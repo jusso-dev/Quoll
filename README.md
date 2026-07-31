@@ -13,7 +13,7 @@
   <a href="#status"><img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.82%2B-b7410e" alt="Rust 1.82+">
-  <img src="https://img.shields.io/badge/tests-194%20passing-brightgreen" alt="194 tests passing">
+  <img src="https://img.shields.io/badge/tests-240%20passing-brightgreen" alt="240 tests passing">
 </p>
 
 > The banner above shows the target state. `quoll scan`, policy evaluation and AI
@@ -150,7 +150,7 @@ calls. A repository with no qualifying hypotheses costs zero tokens.
 
 ## Status
 
-Pre-alpha. Four of eleven crates are implemented; **194 unit tests pass** and the workspace
+Pre-alpha. Five of eleven crates are implemented; **240 unit tests pass** and the workspace
 is clippy-clean.
 
 | Crate | State | Contents |
@@ -159,7 +159,7 @@ is clippy-clean.
 | `quoll-core` | **Implemented** | Domain vocabulary: severity, confidence, evidence, findings, hypotheses, locations, tech stack, and the `quoll.toml` loader. Depends on no scanner, no AI provider and no storage engine. |
 | `quoll-plugin` | **Implemented** | The plugin contract: manifests, capability negotiation, scan context, registry and scheduling, plus the single choke point for subprocess execution. |
 | `quoll-graph` | **Implemented** | File discovery, tree-sitter indexing, the SQLite code graph, and bounded traversal. |
-| `quoll-detect` | Not started | Language, framework, ORM, auth-library and CI-provider detection from manifests and imports. |
+| `quoll-detect` | **Implemented** | Language, framework, ORM, auth-library and CI-provider detection from manifests, file conventions and imports. |
 | `quoll-plugins` | Not started | First-party adapters: Semgrep, Gitleaks, OSV-Scanner, Trivy, cargo-audit, Strix. |
 | `quoll-policy` | Not started | YAML policy packs and deterministic invariant evaluation. |
 | `quoll-engine` | Not started | Scan orchestration, finding normalisation, hypothesis correlation, and CI integration. |
@@ -462,7 +462,7 @@ no API key.
 - [x] Plugin contract, registry and shell-free process execution
 - [x] Code graph: walk, incremental tree-sitter indexing, SQLite storage, bounded traversal
 - [x] `quoll-cli` — the binary, with `init`, `graph`, `plugins` and `doctor` working
-- [ ] Framework detection: Next.js App Router, Better Auth, Drizzle, Prisma, Express, Axum, Actix Web
+- [x] Framework detection: Next.js App Router, Better Auth, Drizzle, Prisma, Express, Axum, Actix Web
 - [ ] Policy packs and deterministic invariant evaluation
 - [ ] Scanner adapters: Semgrep, Gitleaks, OSV-Scanner, cargo-audit
 - [ ] Finding normalisation and deduplication into one schema
