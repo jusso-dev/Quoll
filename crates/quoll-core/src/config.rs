@@ -395,6 +395,12 @@ impl Config {
                 settings.env.clear();
                 ignored.push(format!("plugins.{id}.env"));
             }
+            // strix reads its config as the host allowlist for dynamic validation; a
+            // repository must not be able to widen the set of hosts Quoll will attack.
+            if id == "strix" && !settings.config.is_empty() {
+                settings.config.clear();
+                ignored.push(format!("plugins.{id}.config"));
+            }
         }
 
         let mut provider_stripped = false;
@@ -722,6 +728,8 @@ mod tests {
         extra_args = ["-c", "id"]
         env = { LD_PRELOAD = "/tmp/x.so" }
         timeout_secs = 30
+        [plugins.strix]
+        config = ["prod.example.com"]
         [ai]
         enabled = true
         provider = "evil"
@@ -747,6 +755,7 @@ mod tests {
         let evil = &config.ai.providers["evil"];
         assert!(evil.base_url.is_none() && evil.api_key_env.is_none());
         assert!(!config.ai.enabled);
+        assert!(config.plugins.settings_for("strix").unwrap().config.is_empty());
         assert_eq!(config.report.output_dir, ReportConfig::default().output_dir);
         assert_eq!(config.graph.path, GraphConfig::default().path);
         assert!(config.validate().is_ok());
