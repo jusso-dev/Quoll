@@ -44,6 +44,8 @@ impl Availability {
 ///
 /// Quoll's core depends on this trait and nothing below it. Adding a scanner means
 /// writing an implementation and registering it; no core file changes.
+// `async_trait` marks its boxed-future methods `#[must_use]`, which newer clippy flags.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Plugin: Send + Sync {
     /// Static self-description. Must be cheap and side-effect free.

@@ -228,15 +228,29 @@ fn is_current(version: i32) -> Result<bool> {
 
 /// Pragmas applied to every connection.
 ///
-/// `busy_timeout` comes first so that switching to WAL waits out a concurrent opener
-/// instead of failing. WAL keeps a `quoll graph stats` readable while a scan writes.
+/// WAL keeps a `quoll graph stats` readable while a scan writes. SQLite does not always
+/// consult the busy handler when two connections switch a fresh file to WAL at once, so
+/// that switch is retried on `SQLITE_BUSY` for as long as `busy_timeout` would have waited.
 /// `foreign_keys` is off by default in SQLite and must be enabled per connection, which is
 /// what makes the cascade deletes in the schema actually fire.
 pub fn apply_pragmas(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA busy_timeout = 5000;")
+        .map_err(to_graph_error)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())) {
+            Ok(()) => break,
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(err) => return Err(to_graph_error(err)),
+        }
+    }
     conn.execute_batch(
-        "PRAGMA busy_timeout = 5000;
-         PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
+        "PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA temp_store = MEMORY;",
     )

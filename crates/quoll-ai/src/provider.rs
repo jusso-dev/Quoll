@@ -63,6 +63,8 @@ impl CompletionResponse {
 }
 
 /// A model backend.
+// `async_trait` marks its boxed-future methods `#[must_use]`, which newer clippy flags.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
