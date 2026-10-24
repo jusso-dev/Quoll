@@ -5,7 +5,7 @@ use quoll_core::{time_util, Finding, FindingStatus, Profile, Severity};
 use quoll_plugin::PluginRun;
 use serde::{Deserialize, Serialize};
 
-use crate::verify::{VerificationSummary, Verifier};
+use crate::verify::{redact_secrets, VerificationSummary, Verifier};
 
 /// Report format version.
 ///
@@ -64,6 +64,9 @@ pub struct ScanInfo {
     pub root: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// Remote the commit belongs to, e.g. `https://github.com/org/repo`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_uri: Option<String>,
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
@@ -77,6 +80,7 @@ impl ScanInfo {
             profile,
             root: root.into(),
             commit: None,
+            repository_uri: None,
             started_at: time_util::now_rfc3339(),
             completed_at: None,
             files_scanned: 0,
@@ -85,6 +89,11 @@ impl ScanInfo {
 
     pub fn with_commit(mut self, commit: Option<String>) -> ScanInfo {
         self.commit = commit;
+        self
+    }
+
+    pub fn with_repository_uri(mut self, uri: Option<String>) -> ScanInfo {
+        self.repository_uri = uri;
         self
     }
 
@@ -197,6 +206,11 @@ impl Report {
     pub fn unverified(scan: ScanInfo, findings: Vec<Finding>) -> Report {
         let reported = findings
             .into_iter()
+            .map(|mut finding| {
+                // No verifier runs here, so nothing else would mask a credential's snippet.
+                redact_secrets(&mut finding);
+                finding
+            })
             .map(|finding| ReportedFinding {
                 finding,
                 location_verified: false,
@@ -479,6 +493,19 @@ mod tests {
         assert!(!report.breaches(Severity::Low));
         assert_eq!(report.suppressed_count(), 1);
         assert!(report.counts().is_empty());
+    }
+
+    #[test]
+    fn refuted_findings_do_not_breach_the_gate() {
+        let dir = repo();
+        let mut verifier = Verifier::new(dir.path());
+        let refuted =
+            scanner_finding("x", Severity::Critical, 1).with_status(FindingStatus::Refuted);
+        let report = Report::build(scan(), vec![refuted], &mut verifier);
+
+        assert!(!report.breaches(Severity::Low));
+        assert!(report.counts().is_empty());
+        assert_eq!(report.worst_severity(), None);
     }
 
     #[test]

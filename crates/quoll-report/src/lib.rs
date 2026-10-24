@@ -33,7 +33,7 @@ pub mod verify;
 pub use report::{
     Coverage, Report, ReportedFinding, ScanInfo, ToolInfo, SCHEMA_VERSION,
 };
-pub use verify::{Verification, VerificationSummary, Verifier};
+pub use verify::{is_secret, redact_secrets, Verification, VerificationSummary, Verifier};
 
 use std::fmt;
 use std::path::Path;
@@ -210,6 +210,31 @@ mod tests {
         for path in &paths {
             assert!(path.exists(), "{path:?} missing");
             assert!(std::fs::metadata(path).unwrap().len() > 0);
+        }
+    }
+
+    #[test]
+    fn a_verified_secret_never_reaches_any_format() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.py"), format!("KEY = \"{SECRET}\"\n")).unwrap();
+        let raw = quoll_core::RawFinding::new(
+            "gitleaks",
+            "aws-access-token",
+            "AWS access key",
+            Severity::High,
+            Location::at("config.py", 1),
+        )
+        .with_cwe(["CWE-798".to_string()]);
+
+        let mut verifier = Verifier::new(dir.path());
+        let scan = ScanInfo::new("s", Profile::Fast, dir.path());
+        let report = Report::build(scan, vec![Finding::from_raw(&raw)], &mut verifier);
+
+        assert!(report.findings[0].location_verified);
+        for format in Format::ALL {
+            let body = format.render(&report).unwrap();
+            assert!(!body.contains(SECRET), "{format} leaked the secret");
         }
     }
 }

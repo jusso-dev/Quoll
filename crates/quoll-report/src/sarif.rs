@@ -10,6 +10,7 @@
 //! rehydrate the richer document.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use quoll_core::{FindingStatus, Result};
 use serde::Serialize;
@@ -46,7 +47,7 @@ fn build(report: &Report) -> SarifLog {
         start_time_utc: Some(report.scan.started_at.clone()),
         end_time_utc: report.scan.completed_at.clone(),
         working_directory: Some(SarifArtifactLocation {
-            uri: path_uri(&report.scan.root),
+            uri: directory_uri(&report.scan.root),
             uri_base_id: None,
         }),
         properties: None,
@@ -72,10 +73,12 @@ fn build(report: &Report) -> SarifLog {
             },
             results,
             invocations: vec![invocation],
-            version_control_provenance: report.scan.commit.as_ref().map(|commit| {
+            // `repositoryUri` is required by the schema, so a commit with no known remote
+            // rides in `properties` instead of producing an invalid provenance entry.
+            version_control_provenance: report.scan.repository_uri.as_ref().map(|uri| {
                 vec![SarifVersionControl {
-                    repository_uri: None,
-                    revision_id: Some(commit.clone()),
+                    repository_uri: uri.clone(),
+                    revision_id: report.scan.commit.clone(),
                 }]
             }),
             original_uri_base_ids: {
@@ -83,7 +86,7 @@ fn build(report: &Report) -> SarifLog {
                 map.insert(
                     "%SRCROOT%".to_string(),
                     SarifArtifactLocation {
-                        uri: path_uri(&report.scan.root),
+                        uri: directory_uri(&report.scan.root),
                         uri_base_id: None,
                     },
                 );
@@ -94,6 +97,7 @@ fn build(report: &Report) -> SarifLog {
                 "scanId": report.scan.id,
                 "profile": report.scan.profile,
                 "filesScanned": report.scan.files_scanned,
+                "commit": report.scan.commit,
                 "coverage": report.coverage,
                 "verification": report.verification,
             })),
@@ -198,16 +202,34 @@ fn result_for(item: &ReportedFinding, rule_id: &str) -> SarifResult {
             physical_location: physical(&finding.location),
         }],
         partial_fingerprints: Some(partial),
-        suppressions: if finding.status == FindingStatus::Suppressed {
-            Some(vec![SarifSuppression {
-                kind: "external".into(),
-                status: Some("accepted".into()),
-            }])
-        } else {
-            None
-        },
+        suppressions: suppression(finding).map(|s| vec![s]),
         properties: Some(properties),
     }
+}
+
+/// Suppression for a finding that should not open an alert.
+///
+/// A refuted finding is suppressed rather than omitted: code-scanning dashboards then show
+/// it as dismissed, and the reasoning stays attached. Status is `accepted` because SARIF
+/// treats a `rejected` suppression as one that does not apply.
+fn suppression(finding: &quoll_core::Finding) -> Option<SarifSuppression> {
+    let justification = match finding.status {
+        FindingStatus::Suppressed => None,
+        FindingStatus::Refuted => Some(
+            finding
+                .evidence
+                .iter()
+                .find(|e| e.kind == quoll_core::EvidenceKind::Refuting)
+                .map(|e| format!("Refuted on investigation: {}", e.description))
+                .unwrap_or_else(|| "Investigated and judged a false positive".to_string()),
+        ),
+        _ => return None,
+    };
+    Some(SarifSuppression {
+        kind: "external".into(),
+        status: Some("accepted".into()),
+        justification,
+    })
 }
 
 fn physical(location: &quoll_core::Location) -> SarifPhysicalLocation {
@@ -222,7 +244,7 @@ fn physical(location: &quoll_core::Location) -> SarifPhysicalLocation {
     });
     SarifPhysicalLocation {
         artifact_location: SarifArtifactLocation {
-            uri: location.path.to_string_lossy().replace('\\', "/"),
+            uri: encode_path(&location.path.to_string_lossy().replace('\\', "/")),
             uri_base_id: Some("%SRCROOT%".into()),
         },
         region,
@@ -248,20 +270,42 @@ fn non_empty(s: &str) -> Option<&str> {
     }
 }
 
-fn path_uri(path: &std::path::Path) -> String {
-    let text = path.to_string_lossy();
-    // SARIF wants a URI. Absolute paths become file://; relative ones stay relative.
-    if path.is_absolute() {
-        let normalised = text.replace('\\', "/");
-        if normalised.starts_with('/') {
-            format!("file://{normalised}")
-        } else {
-            // Windows drive path
-            format!("file:///{}", normalised.replace(':', "%3A"))
-        }
-    } else {
-        text.replace('\\', "/")
+/// `file://` URI for a directory, ending in `/`.
+///
+/// SARIF 2.1.0 §3.14.14 requires the trailing slash on a base URI: without it, resolving
+/// `src/a.rs` against `file:///repo` replaces the last segment and yields `file:///src/a.rs`.
+fn directory_uri(path: &std::path::Path) -> String {
+    // A base URI must be absolute; a relative root is resolved against the working directory.
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut normalised = path.to_string_lossy().replace('\\', "/");
+    if !normalised.starts_with('/') {
+        // Windows drive path
+        normalised.insert(0, '/');
     }
+    if !normalised.ends_with('/') {
+        normalised.push('/');
+    }
+    format!("file://{}", encode_path(&normalised))
+}
+
+/// Percent-encode a `/`-separated path for use in a URI.
+///
+/// Everything outside RFC 3986's unreserved set is encoded, byte by byte, except the `/`
+/// separator itself. Spaces, `#`, `?` and `%` in file names would otherwise change what
+/// the URI means.
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(byte as char)
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 // --- SARIF document types -----------------------------------------------------------
@@ -407,8 +451,7 @@ struct SarifInvocation {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SarifVersionControl {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_uri: Option<String>,
+    repository_uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     revision_id: Option<String>,
 }
@@ -419,6 +462,8 @@ struct SarifSuppression {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    justification: Option<String>,
 }
 
 #[cfg(test)]
@@ -498,6 +543,76 @@ mod tests {
             value["runs"][0]["results"][0]["suppressions"][0]["kind"],
             "external"
         );
+    }
+
+    #[test]
+    fn refuted_findings_are_suppressed_with_a_justification() {
+        let finding = Finding::new(
+            "not real",
+            Severity::High,
+            Location::at("src/api.rs", 1),
+            vec![Evidence::refuting(
+                EvidenceSource::Ai {
+                    provider: "openai".into(),
+                    model: "gpt".into(),
+                },
+                "input is a constant",
+                Confidence::new(0.9),
+            )],
+        )
+        .with_status(FindingStatus::Refuted);
+        let report = Report::unverified(ScanInfo::new("s", Profile::Fast, "/repo"), vec![finding]);
+        let value: Value = serde_json::from_str(&render(&report).unwrap()).unwrap();
+
+        let suppression = &value["runs"][0]["results"][0]["suppressions"][0];
+        assert_eq!(suppression["kind"], "external");
+        // `rejected` would mean the suppression does not apply and the alert stays open.
+        assert_eq!(suppression["status"], "accepted");
+        assert!(suppression["justification"]
+            .as_str()
+            .unwrap()
+            .contains("input is a constant"));
+    }
+
+    #[test]
+    fn the_source_root_is_a_directory_uri_and_paths_are_encoded() {
+        let finding = Finding::new(
+            "x",
+            Severity::Low,
+            Location::at("src/my file#1.rs", 1),
+            vec![],
+        );
+        let scan = ScanInfo::new("s", Profile::Fast, "/home/me/my repo");
+        let value: Value =
+            serde_json::from_str(&render(&Report::unverified(scan, vec![finding])).unwrap())
+                .unwrap();
+        let run = &value["runs"][0];
+
+        assert_eq!(
+            run["originalUriBaseIds"]["%SRCROOT%"]["uri"],
+            "file:///home/me/my%20repo/"
+        );
+        assert_eq!(
+            run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "src/my%20file%231.rs"
+        );
+    }
+
+    #[test]
+    fn provenance_needs_a_repository_uri() {
+        let scan = ScanInfo::new("s", Profile::Fast, "/repo").with_commit(Some("abc".into()));
+        let value: Value =
+            serde_json::from_str(&render(&Report::unverified(scan.clone(), vec![])).unwrap())
+                .unwrap();
+        assert!(value["runs"][0].get("versionControlProvenance").is_none());
+        assert_eq!(value["runs"][0]["properties"]["commit"], "abc");
+
+        let scan = scan.with_repository_uri(Some("https://github.com/o/r".into()));
+        let value: Value =
+            serde_json::from_str(&render(&Report::unverified(scan, vec![])).unwrap()).unwrap();
+        let provenance = &value["runs"][0]["versionControlProvenance"][0];
+        assert_eq!(provenance["repositoryUri"], "https://github.com/o/r");
+        assert_eq!(provenance["revisionId"], "abc");
     }
 
     #[test]

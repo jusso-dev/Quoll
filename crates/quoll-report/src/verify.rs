@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use quoll_core::{Finding, Location};
@@ -38,6 +39,54 @@ impl Verification {
     }
 }
 
+/// Files larger than this are never read into memory. A finding in a multi-gigabyte
+/// file is still reported, but as unverifiable rather than at the cost of the process.
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// What a secret finding's snippet is replaced with.
+pub const REDACTED_SNIPPET: &str = "[REDACTED: secret value withheld]";
+
+/// CWEs whose flagged line is, by definition, the credential itself.
+const SECRET_CWES: &[&str] = &["CWE-798", "CWE-259", "CWE-321", "CWE-522"];
+
+/// Plugins whose every result is a credential sitting in the source.
+const SECRET_PLUGINS: &[&str] = &["gitleaks", "trufflehog", "detect-secrets", "ggshield"];
+
+/// Whether a finding points at a credential.
+///
+/// The flagged line of such a finding *is* the secret, so its source text must never be
+/// quoted into a report, however the finding was produced.
+pub fn is_secret(finding: &Finding) -> bool {
+    let secret_cwe = finding
+        .cwe
+        .iter()
+        .any(|cwe| SECRET_CWES.iter().any(|s| cwe.trim().eq_ignore_ascii_case(s)));
+    let secret_plugin = finding
+        .contributing_plugins
+        .iter()
+        .any(|plugin| SECRET_PLUGINS.contains(&plugin.as_str()));
+    let secret_evidence = finding.evidence.iter().any(|e| {
+        matches!(&e.source, quoll_core::EvidenceSource::Scanner { plugin, .. }
+            if SECRET_PLUGINS.contains(&plugin.as_str()))
+    });
+    secret_cwe || secret_plugin || secret_evidence
+}
+
+/// Mask every source excerpt a secret finding carries. Other findings are untouched.
+///
+/// Snippets are replaced rather than removed so a reader can see one was withheld.
+pub fn redact_secrets(finding: &mut Finding) {
+    if !is_secret(finding) {
+        return;
+    }
+    let evidence = finding.evidence.iter_mut().filter_map(|e| e.location.as_mut());
+    for location in std::iter::once(&mut finding.location).chain(evidence) {
+        if location.snippet.is_some() {
+            location.snippet = Some(REDACTED_SNIPPET.to_string());
+        }
+    }
+}
+
 /// What verification did across a whole report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationSummary {
@@ -68,9 +117,18 @@ impl VerificationSummary {
 /// read it once.
 pub struct Verifier {
     root: PathBuf,
-    cache: HashMap<PathBuf, Option<Vec<String>>>,
+    cache: HashMap<PathBuf, Cached>,
     /// Populate `snippet` from disk for verified locations.
     fill_snippets: bool,
+    /// Files above this size are not read; their locations are reported unverifiable.
+    max_file_bytes: u64,
+}
+
+/// A file as the verifier last saw it.
+enum Cached {
+    Lines(Vec<String>),
+    Missing,
+    TooLarge,
 }
 
 impl Verifier {
@@ -79,7 +137,14 @@ impl Verifier {
             root: root.into(),
             cache: HashMap::new(),
             fill_snippets: true,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
         }
+    }
+
+    /// Cap on the size of a file read for verification, in bytes.
+    pub fn max_file_bytes(mut self, bytes: u64) -> Verifier {
+        self.max_file_bytes = bytes;
+        self
     }
 
     pub fn fill_snippets(mut self, fill: bool) -> Verifier {
@@ -98,9 +163,15 @@ impl Verifier {
             return Verification::PathMissing;
         }
 
-        let lines = match self.lines(&location.path) {
-            Some(lines) => lines,
-            None => return Verification::PathMissing,
+        let max_file_bytes = self.max_file_bytes;
+        let lines = match self.load(&location.path) {
+            Cached::Lines(lines) => lines,
+            Cached::Missing => return Verification::PathMissing,
+            Cached::TooLarge => {
+                return Verification::Unreadable {
+                    reason: format!("the file is larger than {max_file_bytes} bytes"),
+                }
+            }
         };
         let file_lines = lines.len() as u32;
 
@@ -121,8 +192,15 @@ impl Verifier {
     ///
     /// Refreshing matters: a snippet recorded by a scanner minutes ago may already be
     /// stale, and a report should quote the file as it is now.
+    ///
+    /// A secret finding is the exception: its line is the credential, so it is never
+    /// quoted, and any snippet it already carries is masked.
     pub fn verify_finding(&mut self, finding: &mut Finding) -> Verification {
         let verification = self.verify(&finding.location);
+        if is_secret(finding) {
+            redact_secrets(finding);
+            return verification;
+        }
         if verification.is_verified() && self.fill_snippets {
             if let Some(snippet) = self.snippet(&finding.location) {
                 finding.location.snippet = Some(snippet);
@@ -162,15 +240,40 @@ impl Verifier {
     }
 
     fn lines(&mut self, relative: &Path) -> Option<&Vec<String>> {
-        let key = relative.to_path_buf();
-        if !self.cache.contains_key(&key) {
-            let absolute = self.root.join(relative);
-            let value = std::fs::read_to_string(&absolute)
-                .ok()
-                .map(|text| text.lines().map(str::to_string).collect());
-            self.cache.insert(key.clone(), value);
+        match self.load(relative) {
+            Cached::Lines(lines) => Some(lines),
+            Cached::Missing | Cached::TooLarge => None,
         }
-        self.cache.get(&key).and_then(|entry| entry.as_ref())
+    }
+
+    fn load(&mut self, relative: &Path) -> &Cached {
+        let absolute = self.root.join(relative);
+        let max = self.max_file_bytes;
+        self.cache
+            .entry(relative.to_path_buf())
+            .or_insert_with(|| read_capped(&absolute, max))
+    }
+}
+
+/// Read a file as lines, refusing to buffer more than `max` bytes of it.
+///
+/// The cap is enforced on the read itself rather than on a prior `metadata` call, so a
+/// file that grows in between cannot slip past it.
+fn read_capped(path: &Path, max: u64) -> Cached {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Cached::Missing,
+    };
+    let mut bytes = Vec::new();
+    if file.take(max.saturating_add(1)).read_to_end(&mut bytes).is_err() {
+        return Cached::Missing;
+    }
+    if bytes.len() as u64 > max {
+        return Cached::TooLarge;
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Cached::Lines(text.lines().map(str::to_string).collect()),
+        Err(_) => Cached::Missing,
     }
 }
 
@@ -319,6 +422,73 @@ mod tests {
 
         verifier.verify_finding(&mut finding);
         assert!(finding.location.snippet.is_none());
+    }
+
+    fn secret_finding(location: Location) -> Finding {
+        let raw = quoll_core::RawFinding::new(
+            "gitleaks",
+            "aws-access-token",
+            "AWS key",
+            Severity::High,
+            location,
+        )
+        .with_cwe(["CWE-798".to_string()]);
+        Finding::from_raw(&raw)
+    }
+
+    #[test]
+    fn a_secret_line_is_never_quoted() {
+        let dir = repo();
+        std::fs::write(dir.path().join(".env"), "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n").unwrap();
+        let mut verifier = Verifier::new(dir.path());
+        let mut finding = secret_finding(Location::at(".env", 1));
+
+        assert!(verifier.verify_finding(&mut finding).is_verified());
+        assert!(finding.location.snippet.is_none());
+    }
+
+    #[test]
+    fn a_secret_snippet_from_any_source_is_masked() {
+        let dir = repo();
+        let mut verifier = Verifier::new(dir.path());
+        let location = Location::at("src/api.rs", 1).with_snippet("KEY=AKIAIOSFODNN7EXAMPLE");
+        let mut finding = secret_finding(location);
+        finding.evidence[0].location = Some(finding.location.clone());
+
+        verifier.verify_finding(&mut finding);
+        assert_eq!(finding.location.snippet.as_deref(), Some(REDACTED_SNIPPET));
+        assert_eq!(
+            finding.evidence[0].location.as_ref().unwrap().snippet.as_deref(),
+            Some(REDACTED_SNIPPET)
+        );
+    }
+
+    #[test]
+    fn secrets_are_recognised_by_cwe_or_by_plugin() {
+        let mut by_cwe = finding(Location::at("src/api.rs", 1), false);
+        assert!(!is_secret(&by_cwe));
+        by_cwe.cwe = vec!["cwe-259".into()];
+        assert!(is_secret(&by_cwe));
+        // A prefix match would sweep in unrelated weaknesses.
+        by_cwe.cwe = vec!["CWE-7980".into()];
+        assert!(!is_secret(&by_cwe));
+
+        let mut by_plugin = finding(Location::at("src/api.rs", 1), false);
+        by_plugin.contributing_plugins = vec!["gitleaks".into()];
+        assert!(is_secret(&by_plugin));
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_unverifiable_not_read() {
+        let dir = repo();
+        let mut verifier = Verifier::new(dir.path()).max_file_bytes(8);
+        let mut finding = finding(Location::at("src/api.rs", 1), false);
+
+        let verification = verifier.verify_finding(&mut finding);
+        assert!(matches!(verification, Verification::Unreadable { .. }));
+        assert!(verification.describe().contains("larger than 8 bytes"));
+        assert!(finding.location.snippet.is_none());
+        assert!(verifier.context(&Location::at("src/api.rs", 1), 1).is_empty());
     }
 
     #[test]
