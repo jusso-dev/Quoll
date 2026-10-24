@@ -82,8 +82,10 @@ impl Indexer {
         let started = std::time::Instant::now();
         let discovery = self.walker.discover()?;
 
+        let tx = graph.transaction()?;
         if self.rebuild {
-            graph.clear_structure()?;
+            // Inside the transaction, so a rebuild that fails part way keeps the old graph.
+            tx.clear_structure()?;
         }
 
         let mut report = IndexReport {
@@ -91,18 +93,24 @@ impl Indexer {
             files_seen: discovery.files.len(),
             ..Default::default()
         };
-        let known: HashSet<PathBuf> = graph
+        let known: HashSet<PathBuf> = tx
             .all_files()?
             .into_iter()
             .map(|record| record.path)
             .collect();
         let present: HashSet<PathBuf> = discovery.files.iter().cloned().collect();
 
-        let tx = graph.transaction()?;
         tx.begin_scan(scan_id, None, "index")?;
+
+        // Forgetting a file cascades away edges other files anchor on its nodes, such as a
+        // call from an unchanged `api.rs` into a changed `db.rs`. Those files are collected
+        // here and have their call sites resolved again after the main pass.
+        let mut dependents: HashSet<PathBuf> = HashSet::new();
+        let mut reparsed: HashSet<PathBuf> = HashSet::new();
 
         // Files that vanished from the tree take their nodes and edges with them.
         for stale in known.difference(&present) {
+            dependents.extend(tx.files_with_edges_into(stale)?);
             tx.forget_file(stale)?;
             report.files_removed += 1;
         }
@@ -137,7 +145,9 @@ impl Indexer {
             }
 
             // Reparsing means every node derived from the old contents is now wrong.
+            dependents.extend(tx.files_with_edges_into(relative)?);
             tx.forget_file(relative)?;
+            reparsed.insert(relative.clone());
             tx.upsert_file(&FileRecord {
                 path: relative.clone(),
                 hash: source.hash.clone(),
@@ -181,6 +191,28 @@ impl Indexer {
                     .into_iter()
                     .map(|reference| (relative.clone(), reference)),
             );
+        }
+
+        // Unchanged files that lost edges to a forgotten neighbour. Their own nodes and
+        // symbols are intact, so only their call sites are collected for resolution.
+        let mut dependents: Vec<PathBuf> = dependents
+            .into_iter()
+            .filter(|path| present.contains(path) && !reparsed.contains(path))
+            .collect();
+        dependents.sort();
+        for relative in dependents {
+            let source = match self.walker.read(&relative)? {
+                Some(source) => source,
+                None => continue,
+            };
+            if let Some(parsed) = self.parsers.parse(&source)? {
+                pending.extend(
+                    parsed
+                        .references
+                        .into_iter()
+                        .map(|reference| (relative.clone(), reference)),
+                );
+            }
         }
 
         // Second pass. Call resolution needs every symbol in the repository to be visible,
@@ -248,6 +280,7 @@ fn write_symbol<G: GraphOps>(
 ///
 /// Relative imports are skipped: they name a file, not a package, and the file already has
 /// its own node. Turning `./db` into a dependency would create one node per import site.
+/// Rust's `crate::`, `self::` and `super::` paths are relative in the same way.
 fn write_import<G: GraphOps>(
     graph: &G,
     file_node: &Node,
@@ -255,7 +288,7 @@ fn write_import<G: GraphOps>(
     import: &Import,
     report: &mut IndexReport,
 ) -> Result<()> {
-    if import.module.starts_with('.') || import.module.starts_with('/') {
+    if is_relative_import(path, &import.module) {
         return Ok(());
     }
     let package = package_of(&import.module);
@@ -270,6 +303,19 @@ fn write_import<G: GraphOps>(
         report.edges_written += 1;
     }
     Ok(())
+}
+
+fn is_relative_import(path: &Path, module: &str) -> bool {
+    if module.starts_with('.') || module.starts_with('/') {
+        return true;
+    }
+    // `use crate::{a, b}` is extracted as plain `crate`, so match the first segment. Only
+    // in Rust: `self` is a legal npm package name.
+    quoll_core::Language::from_path(path) == Some(quoll_core::Language::Rust)
+        && matches!(
+            module.split("::").next(),
+            Some("crate" | "self" | "super")
+        )
 }
 
 /// Reduce an import path to the package that owns it.
@@ -483,6 +529,28 @@ mod tests {
     }
 
     #[test]
+    fn cross_file_calls_survive_a_change_to_the_callee_file() {
+        let mut fixture = Fixture::new();
+        fixture.write("src/api.rs", "pub fn handler() {\n  run_query();\n}\n");
+        fixture.write("src/db.rs", "pub fn run_query() {}\n");
+        fixture.index("scan-1");
+
+        // The callee survives; only its file changes.
+        fixture.write("src/db.rs", "// moved\n\npub fn run_query() {}\npub fn other() {}\n");
+        let report = fixture.index("scan-2");
+        assert_eq!(report.files_parsed, 1);
+        assert_eq!(report.files_unchanged, 1);
+
+        let handler = Node::at(NodeKind::Function, Path::new("src/api.rs"), "handler");
+        let run_query = Node::at(NodeKind::Function, Path::new("src/db.rs"), "run_query");
+        let edges = fixture.graph.edges_from(&handler.id).unwrap();
+        assert!(
+            edges.iter().any(|e| e.kind == EdgeKind::Calls && e.to == run_query.id),
+            "{edges:?}"
+        );
+    }
+
+    #[test]
     fn ambiguous_call_targets_are_left_unresolved() {
         let mut fixture = Fixture::new();
         fixture.write("src/a.rs", "pub fn execute() {}\n");
@@ -534,6 +602,20 @@ mod tests {
         let deps = fixture.graph.nodes_of_kind(NodeKind::Dependency).unwrap();
         let names: Vec<&str> = deps.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["better-auth"]);
+    }
+
+    #[test]
+    fn rust_crate_self_and_super_imports_are_not_dependencies() {
+        let mut fixture = Fixture::new();
+        fixture.write(
+            "src/lib.rs",
+            "pub(crate) use axum::Router;\nuse crate::db;\nuse self::x::y;\nuse super::{a, b};\n",
+        );
+        fixture.index("scan-1");
+
+        let deps = fixture.graph.nodes_of_kind(NodeKind::Dependency).unwrap();
+        let names: Vec<&str> = deps.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["axum"]);
     }
 
     #[test]

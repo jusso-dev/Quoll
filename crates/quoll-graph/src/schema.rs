@@ -175,22 +175,24 @@ CREATE TABLE suppressions (
 
 /// Bring a connection up to [`SCHEMA_VERSION`], creating the schema if it is empty.
 pub fn migrate(conn: &Connection) -> Result<()> {
-    let current: i32 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(to_graph_error)?;
-
-    if current > SCHEMA_VERSION {
-        return Err(Error::Graph(format!(
-            "graph was written by a newer Quoll (schema v{current}, this build supports v{SCHEMA_VERSION}); \
-             delete .quoll/graph.db or upgrade Quoll"
-        )));
-    }
-    if current == SCHEMA_VERSION {
+    // Fast path without the write lock: an up-to-date graph is the common case.
+    if is_current(user_version(conn)?)? {
         return Ok(());
     }
 
     // One transaction for the whole upgrade: a half-migrated graph is worse than no graph.
-    conn.execute_batch("BEGIN").map_err(to_graph_error)?;
+    // IMMEDIATE takes the write lock up front and the version is re-read under it, so a
+    // second process opening a fresh graph (MCP server and CLI) waits for the first one's
+    // migration and then finds nothing to do, instead of re-running `CREATE TABLE`.
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(to_graph_error)?;
+    let current = match user_version(conn).and_then(|v| is_current(v).map(|done| (v, done))) {
+        Ok((_, true)) => return conn.execute_batch("COMMIT").map_err(to_graph_error),
+        Ok((current, false)) => current,
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(err);
+        }
+    };
     for (index, migration) in MIGRATIONS.iter().enumerate() {
         let version = index as i32 + 1;
         if version <= current {
@@ -201,23 +203,42 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             return Err(Error::Graph(format!("migration to v{version} failed: {err}")));
         }
     }
-    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}; COMMIT"))
-        .map_err(to_graph_error)?;
+    if let Err(err) = conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}; COMMIT")) {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(to_graph_error(err));
+    }
     Ok(())
+}
+
+fn user_version(conn: &Connection) -> Result<i32> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(to_graph_error)
+}
+
+/// Whether a graph at `version` needs no migration. Newer than this build is an error.
+fn is_current(version: i32) -> Result<bool> {
+    if version > SCHEMA_VERSION {
+        return Err(Error::Graph(format!(
+            "graph was written by a newer Quoll (schema v{version}, this build supports v{SCHEMA_VERSION}); \
+             delete .quoll/graph.db or upgrade Quoll"
+        )));
+    }
+    Ok(version == SCHEMA_VERSION)
 }
 
 /// Pragmas applied to every connection.
 ///
-/// WAL keeps a `quoll graph stats` readable while a scan writes. `foreign_keys` is off by
-/// default in SQLite and must be enabled per connection, which is what makes the cascade
-/// deletes in the schema actually fire.
+/// `busy_timeout` comes first so that switching to WAL waits out a concurrent opener
+/// instead of failing. WAL keeps a `quoll graph stats` readable while a scan writes.
+/// `foreign_keys` is off by default in SQLite and must be enabled per connection, which is
+/// what makes the cascade deletes in the schema actually fire.
 pub fn apply_pragmas(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
+        "PRAGMA busy_timeout = 5000;
+         PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA busy_timeout = 5000;",
+         PRAGMA temp_store = MEMORY;",
     )
     .map_err(to_graph_error)
 }
@@ -290,6 +311,27 @@ mod tests {
         conn.execute_batch("PRAGMA user_version = 999").unwrap();
         let err = migrate(&conn).unwrap_err();
         assert!(err.to_string().contains("newer Quoll"), "{err}");
+    }
+
+    #[test]
+    fn concurrent_first_opens_all_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(&path).unwrap();
+                    barrier.wait();
+                    apply_pragmas(&conn).and_then(|_| migrate(&conn))
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
     }
 
     #[test]

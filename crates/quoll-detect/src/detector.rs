@@ -558,6 +558,16 @@ mod tests {
     }
 
     #[test]
+    fn restricted_visibility_re_exports_count_as_imports() {
+        let fixture = Fixture::new();
+        fixture.write("src/lib.rs", "pub(crate) use axum::Router;\n");
+
+        let detection = fixture.detect();
+        let axum = detection.get("axum").expect("axum detected from the import alone");
+        assert!(axum.evidence.iter().any(|e| e.contains("imports `axum::Router`")), "{axum:?}");
+    }
+
+    #[test]
     fn development_dependencies_rank_below_runtime_ones() {
         let fixture = Fixture::new();
         fixture.write(

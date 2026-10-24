@@ -186,7 +186,7 @@ impl Parsers {
                 ..Default::default()
             },
         };
-        extractor.walk(tree.root_node(), &mut Vec::new(), &mut Vec::new());
+        extractor.walk(tree.root_node());
         Ok(Some(extractor.out))
     }
 }
@@ -201,7 +201,47 @@ struct Extractor<'a> {
 impl Extractor<'_> {
     /// Depth-first walk carrying two stacks: the enclosing type/module names, and the
     /// enclosing callable, so every call site can be attributed to the function it is in.
-    fn walk(&mut self, node: TsNode<'_>, containers: &mut Vec<String>, callers: &mut Vec<String>) {
+    ///
+    /// Iterative rather than recursive: nesting depth is attacker-controlled (a file of
+    /// 50,000 `[`s parses fine) and recursion would overflow the stack and abort the scan.
+    fn walk(&mut self, root: TsNode<'_>) {
+        let mut containers = Vec::new();
+        let mut callers = Vec::new();
+        // What `enter` pushed, one entry per node on the path from the root to the cursor.
+        let mut frames: Vec<(bool, bool)> = Vec::new();
+        let mut cursor = root.walk();
+        loop {
+            frames.push(self.enter(cursor.node(), &mut containers, &mut callers));
+            if cursor.goto_first_child() {
+                continue;
+            }
+            // Leave nodes until one has a next sibling, or the root is left.
+            loop {
+                let (pushed_container, pushed_caller) = frames.pop().unwrap_or_default();
+                if pushed_caller {
+                    callers.pop();
+                }
+                if pushed_container {
+                    containers.pop();
+                }
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Record what one node contributes and push onto the scope stacks. Returns
+    /// `(pushed_container, pushed_caller)` so the walk can pop them when leaving the node.
+    fn enter(
+        &mut self,
+        node: TsNode<'_>,
+        containers: &mut Vec<String>,
+        callers: &mut Vec<String>,
+    ) -> (bool, bool) {
         let kind = node.kind();
         let mut pushed_container = false;
         let mut pushed_caller = false;
@@ -246,18 +286,7 @@ impl Extractor<'_> {
                 pushed_container = true;
             }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            self.walk(child, containers, callers);
-        }
-
-        if pushed_caller {
-            callers.pop();
-        }
-        if pushed_container {
-            containers.pop();
-        }
+        (pushed_container, pushed_caller)
     }
 
     /// Classify a node as a declaration, if it is one.
@@ -415,14 +444,30 @@ fn extract_module(text: &str) -> Option<String> {
         let end = rest.find(quote)?;
         return Some(rest[..end].to_string());
     }
-    // Rust: `use std::process::Command;` or `use axum::{Router, routing::get};`
-    let trimmed = text.trim().trim_start_matches("pub ").trim_start_matches("use ");
+    // Rust: `use std::process::Command;` or `pub(crate) use axum::{Router, routing::get};`
+    let trimmed = strip_visibility(text.trim()).trim_start_matches("use ");
     let path = trimmed.split(['{', ';']).next()?.trim().trim_end_matches("::");
     if path.is_empty() {
         None
     } else {
         Some(path.to_string())
     }
+}
+
+/// Drop a leading Rust visibility: `pub`, `pub(crate)`, `pub(super)`, `pub(in a::b)`.
+fn strip_visibility(text: &str) -> &str {
+    let rest = match text.strip_prefix("pub") {
+        Some(rest) if rest.starts_with(|c: char| c == '(' || c.is_whitespace()) => rest.trim_start(),
+        _ => return text,
+    };
+    let rest = match rest.strip_prefix('(') {
+        Some(inner) => match inner.find(')') {
+            Some(close) => &inner[close + 1..],
+            None => return text,
+        },
+        None => rest,
+    };
+    rest.trim_start()
 }
 
 /// Named bindings inside `{ ... }`, for both `import { a, b }` and `use x::{a, b}`.
@@ -616,6 +661,38 @@ mod tests {
         assert!(Parsers::new().parse(&file).unwrap().is_none());
         assert!(!is_supported(&Language::Python));
         assert!(is_supported(&Language::Rust));
+    }
+
+    #[test]
+    fn rust_visibility_prefixes_are_stripped_from_use_paths() {
+        let parsed = parse(
+            "src/lib.rs",
+            "pub use axum::Router;\npub(crate) use sqlx::PgPool;\npub(super) use crate::db;\n\
+             pub(in crate::a) use self::x::{y, z};\n",
+        );
+        let modules: Vec<&str> = parsed.imports.iter().map(|i| i.module.as_str()).collect();
+        assert_eq!(modules, vec!["axum::Router", "sqlx::PgPool", "crate::db", "self::x"]);
+    }
+
+    #[test]
+    fn deeply_nested_input_does_not_overflow_the_stack() {
+        let depth = 50_000;
+        let text = format!(
+            "fn deep() {{\n  let x = {}0{};\n  helper();\n}}\n",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        // Run on a thread with a small stack so a recursive walk would fail even where the
+        // main test thread's stack happens to be large.
+        let parsed = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || parse("src/deep.rs", &text))
+            .unwrap()
+            .join()
+            .expect("walk must not overflow the stack");
+        assert_eq!(names(&parsed), vec!["deep"]);
+        let helper = parsed.references.iter().find(|r| r.name == "helper").unwrap();
+        assert_eq!(helper.caller.as_deref(), Some("deep"));
     }
 
     #[test]

@@ -78,16 +78,6 @@ impl Graph {
         Ok(Tx(tx))
     }
 
-    /// Drop every node, edge and symbol, keeping scan history.
-    ///
-    /// Used by `quoll graph build --rebuild` when the parser has changed and previously
-    /// stored structure can no longer be trusted.
-    pub fn clear_structure(&mut self) -> Result<()> {
-        self.conn
-            .execute_batch("DELETE FROM edges; DELETE FROM nodes; DELETE FROM symbols; DELETE FROM files;")
-            .map_err(to_graph_error)
-    }
-
     /// Reclaim space after a large deletion.
     pub fn vacuum(&self) -> Result<()> {
         self.conn.execute_batch("VACUUM").map_err(to_graph_error)
@@ -196,6 +186,42 @@ pub trait GraphOps {
         conn.execute("DELETE FROM files WHERE path = ?1", params![key])
             .map_err(to_graph_error)?;
         Ok(())
+    }
+
+    /// Other files that anchor an edge touching one of this file's nodes.
+    ///
+    /// [`GraphOps::forget_file`] cascades those edges away along with the nodes, so the
+    /// files returned here must have their edges re-derived even when their own contents
+    /// did not change.
+    fn files_with_edges_into(&self, path: &Path) -> Result<Vec<PathBuf>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT path FROM edges
+                 WHERE path IS NOT NULL AND path <> ?1
+                   AND (to_id IN (SELECT id FROM nodes WHERE path = ?1)
+                        OR from_id IN (SELECT id FROM nodes WHERE path = ?1))
+                 ORDER BY path",
+            )
+            .map_err(to_graph_error)?;
+        let rows = stmt
+            .query_map(params![path_key(path)], |row| {
+                Ok(PathBuf::from(row.get::<_, String>(0)?))
+            })
+            .map_err(to_graph_error)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(to_graph_error)
+    }
+
+    /// Drop every node, edge, symbol and file record, keeping scan history.
+    ///
+    /// Used by `quoll graph build --rebuild` when the parser has changed and previously
+    /// stored structure can no longer be trusted. Call it on a [`Tx`] so a failed rebuild
+    /// leaves the old graph in place.
+    fn clear_structure(&self) -> Result<()> {
+        self.conn()
+            .execute_batch("DELETE FROM edges; DELETE FROM nodes; DELETE FROM symbols; DELETE FROM files;")
+            .map_err(to_graph_error)
     }
 
     /// Record the hash a file had during a given scan.
@@ -801,6 +827,37 @@ mod tests {
             tx.commit().unwrap();
         }
         assert_eq!(graph.stats().unwrap().nodes, 1);
+    }
+
+    #[test]
+    fn an_abandoned_rebuild_keeps_the_old_structure() {
+        let mut graph = graph();
+        graph.upsert_node(&function("src/a.rs", "kept", 1)).unwrap();
+        {
+            let tx = graph.transaction().unwrap();
+            tx.clear_structure().unwrap();
+            assert_eq!(tx.stats().unwrap().nodes, 0);
+            // Dropped without commit, as when indexing fails part way.
+        }
+        assert_eq!(graph.stats().unwrap().nodes, 1);
+    }
+
+    #[test]
+    fn files_with_edges_into_names_the_callers_files() {
+        let graph = graph();
+        let a = function("src/a.rs", "caller", 1);
+        let b = function("src/b.rs", "callee", 1);
+        graph.upsert_node(&a).unwrap();
+        graph.upsert_node(&b).unwrap();
+        graph
+            .upsert_edge(&Edge::new(a.id.clone(), b.id.clone(), EdgeKind::Calls).in_file("src/a.rs"))
+            .unwrap();
+
+        assert_eq!(
+            graph.files_with_edges_into(Path::new("src/b.rs")).unwrap(),
+            vec![PathBuf::from("src/a.rs")]
+        );
+        assert!(graph.files_with_edges_into(Path::new("src/a.rs")).unwrap().is_empty());
     }
 
     #[test]
