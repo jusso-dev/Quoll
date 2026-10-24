@@ -40,6 +40,8 @@ impl Provider for CommandProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
+        // A timed-out or abandoned call must not leave an agent CLI running.
+        command.kill_on_drop(true);
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
@@ -49,28 +51,45 @@ impl Provider for CommandProvider {
             message: format!("failed to spawn `{}`: {e}", self.program),
         })?;
 
-        if let Some(mut stdin) = child.stdin.take() {
+        // The prompt is written while the output is read, and both sit inside the
+        // timeout. Writing first would deadlock on a prompt larger than the pipe buffer
+        // against a CLI that streams output before it has read all of its input.
+        let stdin = child.stdin.take();
+        let body = format!("{}\n\n{}", request.system, request.user);
+        let write = async move {
             use tokio::io::AsyncWriteExt;
-            let body = format!("{}\n\n{}", request.system, request.user);
-            stdin.write_all(body.as_bytes()).await.map_err(|e| Error::Ai {
-                provider: self.id.clone(),
-                message: format!("failed to write prompt: {e}"),
-            })?;
-        }
+            if let Some(mut stdin) = stdin {
+                stdin.write_all(body.as_bytes()).await?;
+            }
+            // Dropping stdin closes it, so the child sees end of input.
+            Ok::<(), std::io::Error>(())
+        };
+        let exchange = async { tokio::join!(write, child.wait_with_output()) };
 
-        let output = tokio::time::timeout(
+        let (written, output) = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            child.wait_with_output(),
+            exchange,
         )
         .await
         .map_err(|_| Error::Timeout {
             what: format!("ai provider `{}`", self.id),
             seconds: self.timeout_secs,
-        })?
-        .map_err(|e| Error::Ai {
+        })?;
+        let output = output.map_err(|e| Error::Ai {
             provider: self.id.clone(),
             message: e.to_string(),
         })?;
+        // A child that exits without reading all of its input closes the pipe; its exit
+        // status says more about what went wrong than the broken pipe does.
+        match written {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+                return Err(Error::Ai {
+                    provider: self.id.clone(),
+                    message: format!("failed to write prompt: {e}"),
+                })
+            }
+            _ => {}
+        }
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -88,5 +107,42 @@ impl Provider for CommandProvider {
             input_tokens: request.estimated_tokens / 2,
             output_tokens: tokens,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(script: &str, timeout_secs: u64) -> CommandProvider {
+        let config = ProviderConfig {
+            kind: "command".into(),
+            command: Some("/bin/sh".into()),
+            args: vec!["-c".into(), script.into()],
+            timeout_secs: Some(timeout_secs),
+            ..Default::default()
+        };
+        CommandProvider::from_config("cli", &config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_prompt_larger_than_the_pipe_buffer_does_not_deadlock() {
+        // `cat` echoes as it reads, so it fills stdout before it has drained stdin.
+        let user = "x".repeat(4 * 1024 * 1024);
+        let response = provider("cat", 30)
+            .complete(CompletionRequest::investigate("sys", user.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.text.len(), "sys\n\n".len() + user.len());
+    }
+
+    #[tokio::test]
+    async fn a_slow_command_times_out() {
+        let started = std::time::Instant::now();
+        let result = provider("sleep 30", 1)
+            .complete(CompletionRequest::investigate("sys", "user"))
+            .await;
+        assert!(matches!(result, Err(Error::Timeout { .. })), "{result:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 }

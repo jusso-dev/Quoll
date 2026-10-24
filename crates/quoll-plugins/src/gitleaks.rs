@@ -54,6 +54,7 @@ impl Plugin for Gitleaks {
         let report_path = ctx.ensure_work_dir()?.join("gitleaks.json");
 
         let mut exec = common::command(ctx, "gitleaks")
+            .inherit_env(["GITLEAKS_*"])
             // `dir` scans the working tree. History scanning is a separate, far slower
             // mode and belongs to the deep profile, not to every run.
             .arg("dir")
@@ -71,14 +72,21 @@ impl Plugin for Gitleaks {
             exec = exec.arg("--config").path_arg(config);
         }
 
-        let output = common::with_extra_args(exec, ctx).run_lenient().await?;
+        // Findings exit with the configured `--exit-code`; anything else (Gitleaks exits 1
+        // on a bad config) is a failure, not a clean scan.
+        let output = common::with_extra_args(exec, ctx)
+            .success_codes([0, common::findings_exit_code(ctx, 0)])
+            .run()
+            .await?;
 
         // Gitleaks writes to the report file, not to stdout.
         let text = match std::fs::read_to_string(&report_path) {
             Ok(text) => text,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(PluginOutput::default()
-                    .warn(format!("gitleaks wrote no report: {}", output.error_summary())));
+                return Err(quoll_core::Error::plugin(
+                    "gitleaks",
+                    format!("wrote no report: {}", output.error_summary()),
+                ));
             }
             Err(err) => return Err(quoll_core::Error::io(report_path, err)),
         };

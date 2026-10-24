@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use quoll_core::{Error, Result, Severity};
-use quoll_plugin::{Exec, ScanContext};
+use quoll_plugin::{CommandOutput, Exec, ScanContext};
 
 /// Build the invocation for a tool, applying everything the user configured.
 ///
@@ -29,6 +29,42 @@ pub fn command(ctx: &ScanContext, default_binary: &str) -> Exec {
 /// and forking the adapter to get it is worse than passing it through.
 pub fn with_extra_args(exec: Exec, ctx: &ScanContext) -> Exec {
     exec.args(ctx.settings().extra_args.clone())
+}
+
+/// The exit code a tool was told to use for "findings present", honouring a user override.
+///
+/// Trivy and Gitleaks are run with `--exit-code 0` so findings are not failures. A user who
+/// passes their own `--exit-code` in `extra_args` moves that code, and it must still count
+/// as success. The last occurrence wins, as it does for the tools themselves.
+pub fn findings_exit_code(ctx: &ScanContext, default: i32) -> i32 {
+    let args = &ctx.settings().extra_args;
+    let mut code = default;
+    for (i, arg) in args.iter().enumerate() {
+        let value = match arg.strip_prefix("--exit-code") {
+            Some("") => args.get(i + 1).map(String::as_str),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        };
+        if let Some(parsed) = value.and_then(|v| v.parse().ok()) {
+            code = parsed;
+        }
+    }
+    code
+}
+
+/// The JSON report a tool printed, or an error if it printed nothing.
+///
+/// Every adapter that reads stdout asks for a JSON format, and every one of those tools
+/// prints a document even when it finds nothing. Empty stdout therefore means the tool did
+/// not scan, and must not be reported as a clean result.
+pub fn report<'a>(tool: &str, output: &'a CommandOutput) -> Result<&'a str> {
+    if output.stdout.trim().is_empty() {
+        return Err(Error::plugin(
+            tool,
+            format!("produced no report: {}", output.error_summary()),
+        ));
+    }
+    Ok(&output.stdout)
 }
 
 /// Parse a tool's JSON, naming the tool when it fails.
@@ -136,6 +172,34 @@ mod tests {
         assert_eq!(severity_from_cvss(5.3), Severity::Medium);
         assert_eq!(severity_from_cvss(2.1), Severity::Low);
         assert_eq!(severity_from_cvss(0.0), Severity::Info);
+    }
+
+    #[test]
+    fn a_user_exit_code_override_is_honoured() {
+        let ctx = |args: &[&str]| {
+            ScanContext::new("/repo", quoll_core::Profile::Fast).with_settings(
+                quoll_core::config::PluginSettings {
+                    extra_args: args.iter().map(|a| a.to_string()).collect(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(findings_exit_code(&ctx(&[]), 0), 0);
+        assert_eq!(findings_exit_code(&ctx(&["--exit-code", "7"]), 0), 7);
+        assert_eq!(findings_exit_code(&ctx(&["--exit-code=3", "--exit-code=5"]), 0), 5);
+        assert_eq!(findings_exit_code(&ctx(&["--exit-codes", "9"]), 0), 0);
+    }
+
+    #[test]
+    fn empty_stdout_is_not_a_clean_report() {
+        let output = CommandOutput {
+            status: Some(0),
+            stdout: " \n".into(),
+            stderr: "fatal: no database\n".into(),
+            duration: std::time::Duration::ZERO,
+        };
+        let err = report("trivy", &output).unwrap_err();
+        assert!(err.to_string().contains("no database"), "{err}");
     }
 
     #[test]

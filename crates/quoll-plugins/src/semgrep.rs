@@ -66,6 +66,7 @@ impl Plugin for Semgrep {
         };
 
         let mut exec = common::command(ctx, "semgrep")
+            .inherit_env(["SEMGREP_*"])
             .arg("--json")
             .arg("--quiet")
             .arg("--disable-version-check")
@@ -88,15 +89,21 @@ impl Plugin for Semgrep {
         }
 
         for path in ctx.target_files() {
-            exec = exec.path_arg(path);
+            // `./` keeps a file named `--output=x` or `--autofix` from being read as an
+            // option. Semgrep reports the path back with the prefix, which `relative` strips.
+            exec = exec.path_arg(Path::new(".").join(path));
         }
         if ctx.target_files().is_empty() {
             return Ok(PluginOutput::skipped("no files in scope"));
         }
 
-        // Semgrep exits 1 when it finds something, which is not a failure.
-        let output = common::with_extra_args(exec, ctx).run_lenient().await?;
-        let findings = parse(ctx.root(), &output.stdout)?;
+        // Semgrep exits 1 when it finds something under `--error`, which is not a failure.
+        // 2 and above are fatal: bad rules, missing config, invalid language.
+        let output = common::with_extra_args(exec, ctx)
+            .success_codes([0, 1])
+            .run()
+            .await?;
+        let findings = parse(ctx.root(), common::report("semgrep", &output)?)?;
 
         let mut result = PluginOutput::default().with_findings(findings);
         result.files_scanned = ctx.target_files().len();
@@ -181,6 +188,10 @@ impl OneOrMany {
 struct SemgrepError {
     #[serde(default)]
     message: String,
+    /// `error` for a fatal problem such as an invalid rule; `warn` for a per-file one such
+    /// as a parse failure or a timeout.
+    #[serde(default)]
+    level: String,
 }
 
 /// Convert Semgrep's JSON report into findings.
@@ -193,6 +204,18 @@ pub fn parse(root: &Path, json: &str) -> Result<Vec<RawFinding>> {
     }
     let report: Report = common::parse_json("semgrep", json)?;
 
+    // A fatal error means rules did not run. Reporting the remaining results as the
+    // whole picture would pass off a partial scan as a clean one.
+    if let Some(fatal) = report
+        .errors
+        .iter()
+        .find(|e| e.level.eq_ignore_ascii_case("error"))
+    {
+        return Err(quoll_core::Error::plugin(
+            "semgrep",
+            format!("fatal error: {}", fatal.message.trim()),
+        ));
+    }
     for error in &report.errors {
         tracing::debug!(message = %error.message, "semgrep reported an error");
     }
@@ -221,11 +244,13 @@ fn finding(root: &Path, hit: Hit) -> RawFinding {
     }
 
     // Semgrep's INFO is genuinely informational, but its WARNING covers real issues, so
-    // the floor is Low rather than Info.
+    // the floor is Low rather than Info. Newer rules use CRITICAL/HIGH/MEDIUM/LOW, which
+    // map directly.
     let severity = match hit.extra.severity.to_ascii_uppercase().as_str() {
         "ERROR" => Severity::High,
         "WARNING" => Severity::Medium,
-        _ => Severity::Low,
+        "INFO" | "" => Severity::Low,
+        other => common::severity(other, Severity::Low),
     };
 
     // The rule id is the last dotted segment; the full id is kept as the rule identity.
@@ -367,6 +392,31 @@ mod tests {
     fn an_empty_report_is_not_an_error() {
         assert!(parse(Path::new("/repo"), r#"{"results":[],"errors":[]}"#).unwrap().is_empty());
         assert!(parse(Path::new("/repo"), "").unwrap().is_empty());
+    }
+
+    #[test]
+    fn newer_severity_words_are_not_flattened_to_low() {
+        let critical = REPORT.replace("\"ERROR\"", "\"CRITICAL\"");
+        assert_eq!(parse(Path::new("/repo"), &critical).unwrap()[0].severity, Severity::Critical);
+        let medium = REPORT.replace("\"ERROR\"", "\"MEDIUM\"");
+        assert_eq!(parse(Path::new("/repo"), &medium).unwrap()[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn a_fatal_semgrep_error_fails_the_scan() {
+        let fatal = r#"{"results":[],"errors":[{"level":"error","message":"Invalid rule schema"}]}"#;
+        let err = parse(Path::new("/repo"), fatal).unwrap_err();
+        assert!(err.to_string().contains("Invalid rule schema"), "{err}");
+
+        let per_file = r#"{"results":[],"errors":[{"level":"warn","message":"Syntax error"}]}"#;
+        assert!(parse(Path::new("/repo"), per_file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prefixed_target_paths_come_back_repository_relative() {
+        let report = REPORT.replace("/repo/src/routes/auth.js", "./--autofix");
+        let findings = parse(Path::new("/repo"), &report).unwrap();
+        assert_eq!(findings[0].location.path.to_str().unwrap(), "--autofix");
     }
 
     #[test]

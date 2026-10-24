@@ -388,6 +388,9 @@ impl Plugin for Strix {
         .map_err(|e| quoll_core::Error::io(brief_path.clone(), e))?;
 
         let exec = common::command(ctx, "strix")
+            // Strix needs its model settings (`STRIX_LLM`, `LLM_API_KEY`, `LLM_API_BASE`),
+            // its optional search key and the Docker daemon that hosts its sandbox.
+            .inherit_env(["STRIX_*", "LLM_*", "DEDUPE_LLM_*", "PERPLEXITY_API_KEY", "DOCKER_*"])
             .arg("--target")
             .arg(&target.url)
             .arg("--brief")
@@ -395,11 +398,17 @@ impl Plugin for Strix {
             .arg("--format")
             .arg("json");
 
-        let output = common::with_extra_args(exec, ctx).run_lenient().await?;
+        // Strix exits 2 when it reports vulnerabilities. A usage error also exits 2, but
+        // prints no report, which `common::report` turns into a failure.
+        let output = common::with_extra_args(exec, ctx)
+            .success_codes([0, 2])
+            .run()
+            .await;
         let _ = std::fs::remove_file(&brief_path);
+        let output = output?;
 
         Ok(PluginOutput::default()
-            .with_findings(parse(ctx.root(), &output.stdout)?)
+            .with_findings(parse(ctx.root(), common::report("strix", &output)?)?)
             .note(format!("dynamic validation ran against {}", target.host)))
     }
 }

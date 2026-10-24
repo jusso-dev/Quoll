@@ -1269,6 +1269,7 @@ name = "quoll-plugin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "libc",
  "quoll-core",
  "serde",
  "serde_json",

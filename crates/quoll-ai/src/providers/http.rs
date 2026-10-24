@@ -24,6 +24,7 @@ impl HttpProvider {
             .unwrap_or_else(|| default_base(&config.kind).to_string())
             .trim_end_matches('/')
             .to_string();
+        check_base_url(id, &base_url)?;
 
         let api_key = match &config.api_key_env {
             Some(env_name) => match std::env::var(env_name) {
@@ -112,7 +113,7 @@ impl Provider for HttpProvider {
         if !status.is_success() {
             return Err(Error::Ai {
                 provider: self.id.clone(),
-                message: format!("HTTP {status}: {body}"),
+                message: format!("HTTP {status}: {}", truncate(&body, ERROR_BODY_LIMIT)),
             });
         }
 
@@ -144,6 +145,44 @@ impl Provider for HttpProvider {
     }
 }
 
+/// Most of an error response carried into an error message. Gateways answer failures with
+/// whole HTML pages, and some echo the request — prompt and source code included.
+const ERROR_BODY_LIMIT: usize = 2048;
+
+fn truncate(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} bytes truncated)", &text[..end], text.len() - end)
+}
+
+/// Refuse to send prompts — which carry source code — and the API key over plain HTTP,
+/// except to this machine, where a local model server (Ollama) has no TLS to offer.
+fn check_base_url(id: &str, base_url: &str) -> Result<()> {
+    let url = reqwest::Url::parse(base_url).map_err(|e| {
+        Error::config(format!("provider `{id}` has an invalid base_url `{base_url}`: {e}"))
+    })?;
+    let loopback = url.host_str().is_some_and(|host| {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        scheme => Err(Error::config(format!(
+            "provider `{id}` base_url must use https (got `{scheme}://`); plain http is only \
+             allowed to localhost"
+        ))),
+    }
+}
+
 fn default_base(kind: &str) -> &'static str {
     match kind {
         "anthropic" => "https://api.anthropic.com/v1",
@@ -157,5 +196,38 @@ fn default_model(kind: &str) -> &'static str {
         "ollama" => "llama3.2",
         "anthropic" => "claude-sonnet-4-20250514",
         _ => "gpt-4.1-mini",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_http_is_refused_except_to_loopback() {
+        assert!(check_base_url("p", "https://api.example.com/v1").is_ok());
+        assert!(check_base_url("p", "http://127.0.0.1:11434/v1").is_ok());
+        assert!(check_base_url("p", "http://localhost:8080").is_ok());
+        assert!(check_base_url("p", "http://[::1]:8080/v1").is_ok());
+        assert!(check_base_url("p", "http://gateway.internal/v1").is_err());
+        assert!(check_base_url("p", "http://127.0.0.1.evil.com/v1").is_err());
+        assert!(check_base_url("p", "ftp://localhost/v1").is_err());
+        assert!(check_base_url("p", "not a url").is_err());
+    }
+
+    #[test]
+    fn the_default_bases_pass_the_check() {
+        for kind in ["openai", "anthropic", "ollama"] {
+            assert!(check_base_url(kind, default_base(kind)).is_ok(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn error_bodies_are_bounded() {
+        let body = "é".repeat(5000);
+        let short = truncate(&body, ERROR_BODY_LIMIT);
+        assert!(short.len() < ERROR_BODY_LIMIT + 64, "{}", short.len());
+        assert!(short.ends_with("bytes truncated)"));
+        assert_eq!(truncate("short", ERROR_BODY_LIMIT), "short");
     }
 }

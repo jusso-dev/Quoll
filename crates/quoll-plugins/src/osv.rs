@@ -91,11 +91,23 @@ impl Plugin for OsvScanner {
             .arg("--recursive")
             .path_arg(ctx.root());
 
-        // Exits 1 when vulnerabilities are found.
-        let output = common::with_extra_args(exec, ctx).run_lenient().await?;
-        Ok(PluginOutput::default().with_findings(parse(ctx.root(), &output.stdout)?))
+        // 0 is clean, 1 is vulnerabilities found and 128 is "no packages found". 127 and
+        // 129 upwards are failures (bad flags, network, unparseable lockfiles).
+        let output = common::with_extra_args(exec, ctx)
+            .success_codes([0, 1, NO_PACKAGES_FOUND])
+            .run()
+            .await?;
+        if output.status == Some(NO_PACKAGES_FOUND) && output.stdout.trim().is_empty() {
+            return Ok(PluginOutput::default());
+        }
+        let report = common::report("osv-scanner", &output)?;
+        Ok(PluginOutput::default().with_findings(parse(ctx.root(), report)?))
     }
 }
+
+/// OSV-Scanner's exit code when nothing it can scan was found. Not an error: the
+/// lockfiles present may all be of kinds it does not read.
+const NO_PACKAGES_FOUND: i32 = 128;
 
 #[derive(Debug, Deserialize)]
 struct Report {

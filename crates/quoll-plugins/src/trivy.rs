@@ -61,6 +61,7 @@ impl Plugin for Trivy {
         }
 
         let exec = common::command(ctx, "trivy")
+            .inherit_env(["TRIVY_*"])
             .arg("filesystem")
             .arg("--format")
             .arg("json")
@@ -72,8 +73,14 @@ impl Plugin for Trivy {
             .arg("0")
             .path_arg(ctx.root());
 
-        let output = common::with_extra_args(exec, ctx).run_lenient().await?;
-        Ok(PluginOutput::default().with_findings(parse(ctx.root(), &output.stdout)?))
+        // With `--exit-code 0`, any other code is Trivy failing (database download, bad
+        // flag), not Trivy finding something.
+        let output = common::with_extra_args(exec, ctx)
+            .success_codes([0, common::findings_exit_code(ctx, 0)])
+            .run()
+            .await?;
+        let report = common::report("trivy", &output)?;
+        Ok(PluginOutput::default().with_findings(parse(ctx.root(), report)?))
     }
 }
 

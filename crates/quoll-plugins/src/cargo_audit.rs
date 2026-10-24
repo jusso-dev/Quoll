@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use quoll_core::{Confidence, Ecosystem, Language, Location, RawFinding, Result, Severity};
@@ -56,31 +57,38 @@ impl Plugin for CargoAudit {
 
     async fn run(&self, ctx: &ScanContext) -> Result<PluginOutput> {
         let lockfiles = ctx.files_named("Cargo.lock");
-        let lockfile = match lockfiles.first() {
-            Some(path) => path.clone(),
-            None => return Ok(PluginOutput::skipped("no Cargo.lock")),
-        };
+        if lockfiles.is_empty() {
+            return Ok(PluginOutput::skipped("no Cargo.lock"));
+        }
 
-        let mut exec = common::command(ctx, "cargo-audit")
-            .arg("audit")
-            .arg("--json")
-            .arg("--file")
-            .path_arg(ctx.absolute(&lockfile));
+        // A repository can hold several independent workspaces (a fuzz crate, an example,
+        // a vendored tool), each with its own lockfile. Every one is audited.
+        let mut findings = Vec::new();
+        for (index, lockfile) in lockfiles.iter().enumerate() {
+            let mut exec = common::command(ctx, "cargo-audit")
+                .inherit_env(["CARGO_HOME", "RUSTUP_HOME", "CARGO_NET_*", "CARGO_HTTP_*"])
+                .arg("audit")
+                .arg("--json")
+                .arg("--file")
+                .path_arg(ctx.absolute(lockfile));
 
-        if ctx.is_offline() {
             // The advisory database is a git checkout; without a fetch, cargo-audit uses
-            // whatever is already cached rather than failing.
-            exec = exec.arg("--no-fetch");
+            // whatever is already cached rather than failing. After the first lockfile the
+            // cache is fresh, so fetching again only costs time.
+            if ctx.is_offline() || index > 0 {
+                exec = exec.arg("--no-fetch");
+            }
+
+            // Exits 1 when advisories are found, and also when it fails — but a failure
+            // prints no report, which `common::report` rejects.
+            let output = common::with_extra_args(exec, ctx)
+                .success_codes([0, 1])
+                .run()
+                .await?;
+            findings.extend(parse(lockfile, common::report("cargo-audit", &output)?)?);
         }
 
-        // Exits 1 when advisories are found.
-        let output = common::with_extra_args(exec, ctx).run_lenient().await?;
-        if output.stdout.trim().is_empty() {
-            return Ok(PluginOutput::default()
-                .warn(format!("cargo-audit produced no report: {}", output.error_summary())));
-        }
-
-        Ok(PluginOutput::default().with_findings(parse(&lockfile, &output.stdout)?))
+        Ok(PluginOutput::default().with_findings(findings))
     }
 }
 
@@ -277,23 +285,114 @@ fn unmaintained(location: &Location, kind: &str, warning: Warning) -> RawFinding
     finding
 }
 
-/// Read the base score out of a CVSS v3 vector.
+/// Place a CVSS vector in a severity band.
 ///
-/// RustSec stores the vector, not the score. Rather than implement the full CVSS
-/// calculation, this reads the severity from the impact metrics that dominate it — enough
-/// to place the advisory in the right band, and honest about being an approximation.
+/// RustSec stores the vector, not the score. CVSS 3.x vectors are scored exactly with the
+/// specification's base formula. Anything else — CVSS 4.0, whose scoring is a lookup table
+/// too large to carry here, or a malformed vector — falls back to counting high
+/// confidentiality/integrity/availability impacts, which is an approximation and says so.
 fn cvss_severity(vector: &str) -> Severity {
     if let Ok(score) = vector.trim().parse::<f64>() {
         return common::severity_from_cvss(score);
     }
-    let upper = vector.to_ascii_uppercase();
-    let high_impact = upper.matches("H").count();
-    match (upper.contains("AV:N"), high_impact) {
+    let upper = vector.trim().to_ascii_uppercase();
+    let metrics: BTreeMap<&str, &str> = upper
+        .split('/')
+        .filter_map(|pair| pair.split_once(':'))
+        .collect();
+
+    if metrics.get("CVSS").is_some_and(|v| v.starts_with("3.")) {
+        if let Some(score) = cvss3_base_score(&metrics) {
+            return common::severity_from_cvss(score);
+        }
+    }
+
+    // Only impact metrics count. Matching any `H` would let `AC:H` or `PR:H` — which make
+    // a vulnerability harder to exploit — raise its severity.
+    const IMPACTS: &[&str] = &["C", "I", "A", "VC", "VI", "VA", "SC", "SI", "SA"];
+    let high_impact = IMPACTS
+        .iter()
+        .filter(|metric| metrics.get(*metric) == Some(&"H"))
+        .count();
+    match (metrics.get("AV") == Some(&"N"), high_impact) {
         (true, impacts) if impacts >= 3 => Severity::Critical,
         (true, impacts) if impacts >= 1 => Severity::High,
         (true, _) => Severity::Medium,
         (false, impacts) if impacts >= 2 => Severity::Medium,
         _ => Severity::Low,
+    }
+}
+
+/// The CVSS 3.x base score, per section 7.1 of the v3.1 specification.
+///
+/// `None` when a base metric is missing or has a value the specification does not define.
+fn cvss3_base_score(metrics: &BTreeMap<&str, &str>) -> Option<f64> {
+    let get = |key: &str| metrics.get(key).copied();
+    let changed = match get("S")? {
+        "U" => false,
+        "C" => true,
+        _ => return None,
+    };
+    let attack_vector = match get("AV")? {
+        "N" => 0.85,
+        "A" => 0.62,
+        "L" => 0.55,
+        "P" => 0.2,
+        _ => return None,
+    };
+    let attack_complexity = match get("AC")? {
+        "L" => 0.77,
+        "H" => 0.44,
+        _ => return None,
+    };
+    let privileges = match (get("PR")?, changed) {
+        ("N", _) => 0.85,
+        ("L", false) => 0.62,
+        ("L", true) => 0.68,
+        ("H", false) => 0.27,
+        ("H", true) => 0.5,
+        _ => return None,
+    };
+    let interaction = match get("UI")? {
+        "N" => 0.85,
+        "R" => 0.62,
+        _ => return None,
+    };
+    let impact_of = |key: &str| match get(key)? {
+        "H" => Some(0.56),
+        "L" => Some(0.22),
+        "N" => Some(0.0),
+        _ => None,
+    };
+    let (c, i, a) = (impact_of("C")?, impact_of("I")?, impact_of("A")?);
+
+    let iss = 1.0 - (1.0 - c) * (1.0 - i) * (1.0 - a);
+    let impact = if changed {
+        7.52 * (iss - 0.029) - 3.25 * (iss - 0.02f64).powi(15)
+    } else {
+        6.42 * iss
+    };
+    if impact <= 0.0 {
+        return Some(0.0);
+    }
+    let exploitability =
+        8.22 * attack_vector * attack_complexity * privileges * interaction;
+    let base = if changed {
+        (1.08 * (impact + exploitability)).min(10.0)
+    } else {
+        (impact + exploitability).min(10.0)
+    };
+    Some(round_up(base))
+}
+
+/// CVSS 3.1 `Roundup`: the smallest one-decimal number not below the input, computed in
+/// integers so floating-point noise cannot push 4.0 to 4.1.
+fn round_up(value: f64) -> f64 {
+    let scaled = (value * 100_000.0).round() as i64;
+    if scaled % 10_000 == 0 {
+        scaled as f64 / 100_000.0
+    } else {
+        ((scaled / 10_000) + 1) as f64 / 10.0
     }
 }
 
@@ -392,6 +491,39 @@ mod tests {
     fn an_advisory_with_no_cvss_is_high_not_unknown() {
         let text = r#"{"vulnerabilities":{"list":[{"advisory":{"id":"R-1","title":"T"},"package":{"name":"p","version":"1"}}]},"warnings":{}}"#;
         assert_eq!(parse(Path::new("Cargo.lock"), text).unwrap()[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn cvss3_vectors_are_scored_with_the_specification_formula() {
+        let score = |v: &str| {
+            let upper = v.to_ascii_uppercase();
+            let metrics: BTreeMap<&str, &str> =
+                upper.split('/').filter_map(|p| p.split_once(':')).collect();
+            cvss3_base_score(&metrics).unwrap()
+        };
+        assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8);
+        assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"), 10.0);
+        assert_eq!(score("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"), 6.1);
+        assert_eq!(score("CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"), 7.8);
+        assert_eq!(score("CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"), 0.0);
+    }
+
+    #[test]
+    fn hard_to_exploit_metrics_do_not_raise_severity() {
+        // `AC:H` and `PR:H` make this harder to exploit; the old letter count read them
+        // as high impact and called it High. It scores 2.0.
+        assert_eq!(
+            cvss_severity("CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:L"),
+            Severity::Low
+        );
+    }
+
+    #[test]
+    fn cvss4_falls_back_to_counting_only_impact_metrics() {
+        let low_impact = "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N";
+        assert_eq!(cvss_severity(low_impact), Severity::Medium);
+        let full_impact = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N";
+        assert_eq!(cvss_severity(full_impact), Severity::Critical);
     }
 
     #[test]
