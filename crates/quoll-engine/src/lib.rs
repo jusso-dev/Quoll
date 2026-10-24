@@ -17,6 +17,7 @@
 //! ```
 
 pub mod baseline;
+pub mod ci;
 pub mod classify;
 pub mod correlate;
 pub mod normalize;

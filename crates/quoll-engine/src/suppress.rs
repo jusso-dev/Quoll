@@ -1,5 +1,6 @@
 //! Apply configured suppressions.
 
+use globset::{GlobBuilder, GlobSetBuilder};
 use quoll_core::config::{SuppressConfig, Suppression};
 use quoll_core::{time_util, Finding, FindingStatus};
 
@@ -78,29 +79,35 @@ fn id_matches(finding: &Finding, id: &str) -> bool {
         || finding.title == id
 }
 
+/// Glob match on whole path components (`*` never crosses `/`).
+///
+/// A pattern without `/` matches a file or directory of that name at any depth, the way
+/// `.gitignore` does; a pattern with `/` is anchored at the repository root. Either way a
+/// pattern naming a directory also covers everything beneath it.
 fn path_matches(path: &str, pattern: &str) -> bool {
-    // Minimal glob: `**`, `*`, and exact prefix/suffix. Enough for suppress paths.
     if pattern == "**" || pattern == "*" {
         return true;
     }
-    if let Some(rest) = pattern.strip_prefix("**/") {
-        return path.contains(rest.trim_end_matches("/**"))
-            || path.ends_with(rest.trim_end_matches("/**"))
-            || path.contains(rest.trim_end_matches("/*"));
-    }
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(prefix);
-    }
-    if let Some(prefix) = pattern.strip_suffix("/*") {
-        return path.starts_with(prefix);
-    }
-    if pattern.contains('*') {
-        let parts: Vec<&str> = pattern.split('*').collect();
-        if parts.len() == 2 {
-            return path.starts_with(parts[0]) && path.ends_with(parts[1]);
+    let pattern = pattern.trim_start_matches("./").trim_start_matches('/');
+    let pattern = pattern.trim_end_matches('/');
+    let anchored = if pattern.contains('/') {
+        pattern.to_string()
+    } else {
+        format!("**/{pattern}")
+    };
+    let mut builder = GlobSetBuilder::new();
+    for glob in [anchored.clone(), format!("{anchored}/**")] {
+        match GlobBuilder::new(&glob).literal_separator(true).build() {
+            Ok(glob) => {
+                builder.add(glob);
+            }
+            Err(err) => {
+                tracing::warn!(pattern, error = %err, "invalid suppress path pattern");
+                return path == pattern;
+            }
         }
     }
-    path == pattern || path.ends_with(pattern)
+    builder.build().is_ok_and(|set| set.is_match(path))
 }
 
 #[cfg(test)]
@@ -133,6 +140,23 @@ mod tests {
         };
         apply_suppressions(&mut findings, &config);
         assert_eq!(findings[0].status, FindingStatus::Suppressed);
+    }
+
+    #[test]
+    fn path_patterns_match_whole_components() {
+        // Each of these used to suppress by substring, prefix or suffix.
+        assert!(!path_matches("src/latest_api.rs", "**/test/**"));
+        assert!(!path_matches("testsuite/a.rs", "tests/**"));
+        assert!(!path_matches("src/myconfig.rs", "config.rs"));
+
+        assert!(path_matches("src/test/a.rs", "**/test/**"));
+        assert!(path_matches("test/a.rs", "**/test/**"));
+        assert!(path_matches("tests/unit/a.rs", "tests/**"));
+        assert!(path_matches("src/config.rs", "config.rs"));
+        assert!(path_matches("config.rs", "config.rs"));
+        assert!(path_matches("a/fixtures/b.rs", "fixtures"));
+        assert!(path_matches("web/app.test.js", "*.test.js"));
+        assert!(!path_matches("src/a/b.rs", "src/*.rs"));
     }
 
     #[test]

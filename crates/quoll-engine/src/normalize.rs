@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use quoll_core::finding::has_code;
 use quoll_core::{Finding, FindingStatus, RawFinding, Remediation};
 
 use crate::classify::classify_raw;
@@ -14,7 +15,12 @@ use crate::classify::classify_raw;
 pub fn normalize(raw: Vec<RawFinding>) -> Vec<Finding> {
     let mut by_fp: HashMap<String, Finding> = HashMap::new();
 
-    for item in raw {
+    for mut item in raw {
+        // Placeholder snippets ("requires login") are not code; drop them so reports
+        // and fingerprints do not treat them as context.
+        if !item.location.snippet.as_deref().is_some_and(has_code) {
+            item.location.snippet = None;
+        }
         let class = classify_raw(&item);
         let mut finding = Finding::from_raw(&item);
         // Classification enriches CWE when the tool did not supply one.
@@ -130,6 +136,22 @@ mod tests {
         let a2 = a.clone();
         let findings = normalize(vec![a, a2]);
         assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn placeholder_snippets_neither_merge_hits_nor_survive() {
+        let hit = |line| {
+            RawFinding::new(
+                "semgrep",
+                "sqli",
+                "SQL injection",
+                Severity::High,
+                Location::at("db.rs", line).with_snippet("requires login"),
+            )
+        };
+        let findings = normalize(vec![hit(3), hit(9)]);
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().all(|f| f.location.snippet.is_none()));
     }
 
     #[test]

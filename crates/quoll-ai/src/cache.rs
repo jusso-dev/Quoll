@@ -1,8 +1,11 @@
 //! Investigation cache keyed on hypothesis content.
 //!
 //! Re-running a scan on the same commit must not re-spend tokens on a hypothesis the
-//! model already settled. The key is a hash of class, location and evidence ids — not the
-//! hypothesis id, which can change between builds.
+//! model already settled. The key is a hash of class, location, evidence ids and the full
+//! investigation prompt — not the hypothesis id, which can change between builds.
+//!
+//! The file lives in the scanned repository, so it is not trusted in CI: the engine
+//! starts from an empty cache there.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -74,6 +77,9 @@ fn key(hypothesis: &AttackHypothesis) -> String {
     for id in evidence_ids {
         hasher.update(id.as_bytes());
     }
+    // The full prompt (snippet, evidence text) too, so a seeded entry only ever matches
+    // a hypothesis whose evidence is identical to what was actually investigated.
+    hasher.update(crate::investigate::user_prompt(hypothesis).as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -115,5 +121,21 @@ mod tests {
 
         let reloaded = InvestigationCache::load(&path).unwrap();
         assert_eq!(reloaded.get(&hyp()).unwrap().rationale, "real");
+    }
+
+    #[test]
+    fn entries_only_match_identical_evidence() {
+        let mut cache = InvestigationCache::memory();
+        let verdict = InvestigationVerdict {
+            kind: crate::VerdictKind::Rejected,
+            rationale: "seeded".into(),
+            model: "mock".into(),
+            tokens: 0,
+        };
+        cache.insert(&hyp(), verdict);
+        let mut changed = hyp();
+        changed.location = changed.location.with_snippet("db.query(\"..\" + id)");
+        assert!(cache.get(&changed).is_none());
+        assert!(cache.get(&hyp()).is_some());
     }
 }

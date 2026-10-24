@@ -79,14 +79,18 @@ impl RawFinding {
     }
 
     /// Stable identity across runs and across line-number drift.
+    ///
+    /// Without a real snippet the title alone would collapse every hit of one rule in a
+    /// file into a single finding, so the start line is folded in instead.
     pub fn fingerprint(&self) -> String {
+        let context = match self.location.snippet.as_deref().filter(|s| has_code(s)) {
+            Some(snippet) => snippet.to_string(),
+            None => format!("{}@{}", self.title, self.location.line()),
+        };
         ids::finding_fingerprint(
             &format!("{}:{}", self.plugin, self.rule_id),
             &self.location.path.to_string_lossy(),
-            self.location
-                .snippet
-                .as_deref()
-                .unwrap_or(&self.title),
+            &context,
         )
     }
 
@@ -322,6 +326,15 @@ impl Finding {
     }
 }
 
+/// Placeholder Semgrep OSS emits in `extra.lines` instead of the matched code.
+pub const SNIPPET_PLACEHOLDER: &str = "requires login";
+
+/// Whether a scanner snippet carries actual code rather than nothing or a placeholder.
+pub fn has_code(snippet: &str) -> bool {
+    let snippet = snippet.trim();
+    !snippet.is_empty() && snippet != SNIPPET_PLACEHOLDER
+}
+
 fn collect_plugins(evidence: &[Evidence]) -> Vec<String> {
     let mut plugins: Vec<String> = evidence
         .iter()
@@ -421,6 +434,19 @@ mod tests {
         let first = raw.fingerprint();
         raw.location = Location::at("src/db.rs", 92).with_snippet("db.query(sql)");
         assert_eq!(first, raw.fingerprint());
+    }
+
+    #[test]
+    fn snippetless_hits_of_one_rule_stay_distinct() {
+        let at = |line, snippet: Option<&str>| {
+            let mut location = Location::at(".env", line);
+            location.snippet = snippet.map(str::to_string);
+            RawFinding::new("gitleaks", "generic-api-key", "API key", Severity::High, location)
+                .fingerprint()
+        };
+        assert_ne!(at(1, None), at(2, None));
+        assert_ne!(at(1, Some("requires login")), at(2, Some("requires login")));
+        assert_eq!(at(1, Some("requires login")), at(1, None));
     }
 
     #[test]

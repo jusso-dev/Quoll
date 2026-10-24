@@ -8,63 +8,78 @@ use quoll_core::{HypothesisClass, RawFinding};
 
 /// Best-effort class for a raw scanner finding.
 pub fn classify_raw(raw: &RawFinding) -> HypothesisClass {
-    let haystack = format!(
-        "{} {} {} {}",
-        raw.rule_id,
-        raw.title,
-        raw.description,
-        raw.cwe.join(" ")
-    )
-    .to_ascii_lowercase();
+    let haystack = format!("{} {} {}", raw.rule_id, raw.title, raw.description)
+        .to_ascii_lowercase();
+    // CWE ids compare as numbers: a substring test lets CWE-79 match CWE-798.
+    let mut cwes = cwe_ids(&haystack);
+    for entry in &raw.cwe {
+        cwes.extend(cwe_ids(entry));
+    }
+    let hit = |needles: &[&str], ids: &[u32]| {
+        matches_any(&haystack, needles) || ids.iter().any(|id| cwes.contains(id))
+    };
 
-    if matches_any(&haystack, &["secret", "password", "api_key", "apikey", "token", "credential", "private key"])
+    if hit(&["secret", "password", "api_key", "apikey", "token", "credential", "private key"], &[798, 259])
         || raw.plugin == "gitleaks"
     {
         return HypothesisClass::ExposedSecret;
     }
-    if matches_any(&haystack, &["cve-", "ghsa-", "advisory", "vulnerable depend", "osv", "cargo-audit"])
+    if hit(&["cve-", "ghsa-", "advisory", "vulnerable depend", "osv", "cargo-audit"], &[1395])
         || raw.plugin == "osv-scanner"
         || raw.plugin == "cargo-audit"
     {
         return HypothesisClass::VulnerableDependency;
     }
-    if matches_any(&haystack, &["sql injection", "sqli", "cwe-89"]) {
+    if hit(&["sql injection", "sqli"], &[89]) {
         return HypothesisClass::SqlInjection;
     }
-    if matches_any(&haystack, &["command injection", "os command", "shell injection", "cwe-78"]) {
+    if hit(&["command injection", "os command", "shell injection"], &[78]) {
         return HypothesisClass::CommandInjection;
     }
-    if matches_any(&haystack, &["ssrf", "server-side request", "cwe-918"]) {
+    if hit(&["ssrf", "server-side request"], &[918]) {
         return HypothesisClass::ServerSideRequestForgery;
     }
-    if matches_any(&haystack, &["xss", "cross-site scripting", "cwe-79"]) {
+    if hit(&["xss", "cross-site scripting"], &[79]) {
         return HypothesisClass::CrossSiteScripting;
     }
-    if matches_any(&haystack, &["csrf", "cross-site request forgery", "cwe-352"]) {
+    if hit(&["csrf", "cross-site request forgery"], &[352]) {
         return HypothesisClass::CrossSiteRequestForgery;
     }
-    if matches_any(&haystack, &["idor", "insecure direct object", "cwe-639"]) {
+    if hit(&["idor", "insecure direct object"], &[639]) {
         return HypothesisClass::InsecureDirectObjectReference;
     }
-    if matches_any(&haystack, &["missing auth", "unauthenticated", "cwe-306", "no authentication"]) {
+    if hit(&["missing auth", "unauthenticated", "no authentication"], &[306]) {
         return HypothesisClass::MissingAuthentication;
     }
-    if matches_any(&haystack, &["authori", "authorization", "cwe-862", "cwe-863", "access control"]) {
+    if hit(&["authori", "authorization", "access control"], &[862, 863]) {
         return HypothesisClass::MissingAuthorisation;
     }
-    if matches_any(&haystack, &["tenant", "multi-tenant", "cwe-1230"]) {
+    if hit(&["tenant", "multi-tenant"], &[1230]) {
         return HypothesisClass::TenantIsolationBreach;
     }
-    if matches_any(&haystack, &["deserial", "pickle", "yaml.load", "cwe-502"]) {
+    if hit(&["deserial", "pickle", "yaml.load"], &[502]) {
         return HypothesisClass::UnsafeDeserialisation;
     }
-    if matches_any(&haystack, &["misconfig", "insecure config", "dockerfile", "cwe-16"])
-        || raw.plugin == "trivy"
-    {
+    if hit(&["misconfig", "insecure config", "dockerfile"], &[16]) || raw.plugin == "trivy" {
         return HypothesisClass::InsecureConfiguration;
     }
 
     HypothesisClass::Other(raw.rule_id.clone())
+}
+
+/// Every `CWE-<n>` id mentioned in `text`, case-insensitively, as integers.
+pub fn cwe_ids(text: &str) -> Vec<u32> {
+    let lower = text.to_ascii_lowercase();
+    lower
+        .match_indices("cwe-")
+        .filter_map(|(at, tag)| {
+            let digits: String = lower[at + tag.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+        .collect()
 }
 
 fn matches_any(haystack: &str, needles: &[&str]) -> bool {
@@ -98,5 +113,18 @@ mod tests {
             Location::at("db.js", 3),
         );
         assert_eq!(classify_raw(&raw), HypothesisClass::SqlInjection);
+    }
+
+    #[test]
+    fn cwe_ids_compare_exactly() {
+        assert_eq!(cwe_ids("CWE-79, cwe-798: x"), vec![79, 798]);
+        let with_cwe = |cwe: &str| {
+            RawFinding::new("semgrep", "r", "x", Severity::High, Location::at("a.js", 1))
+                .with_cwe([cwe.to_string()])
+        };
+        assert_eq!(classify_raw(&with_cwe("CWE-79")), HypothesisClass::CrossSiteScripting);
+        assert_eq!(classify_raw(&with_cwe("CWE-798")), HypothesisClass::ExposedSecret);
+        assert_eq!(classify_raw(&with_cwe("CWE-789")), HypothesisClass::Other("r".into()));
+        assert_eq!(classify_raw(&with_cwe("CWE-160")), HypothesisClass::Other("r".into()));
     }
 }

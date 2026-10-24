@@ -1,5 +1,6 @@
 //! End-to-end scan pipeline.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use quoll_policy::Registry as PolicyRegistry;
 use quoll_report::{Coverage, Format, Report, ScanInfo, Verifier};
 
 use crate::baseline::{apply_baseline, load_baseline};
+use crate::ci::{changed_files, effective_base_ref};
 use crate::correlate::{apply_threshold, investigation_queue, merge_promoted, correlate};
 use crate::normalize::{from_policy_violations, normalize};
 use crate::store::{save_last_scan, store_from_outcome};
@@ -28,6 +30,7 @@ use crate::suppress::apply_suppressions;
 pub struct ScanOptions {
     pub config: Config,
     pub profile: Profile,
+    /// No network: scanners run offline and no model provider is called.
     pub offline: bool,
     pub no_ai: bool,
     pub fail_on: Severity,
@@ -62,12 +65,16 @@ impl ScanOptions {
         }
     }
 
+    /// Switch profile. The gate follows the profile unless `fail_on` is configured;
+    /// call `with_fail_on` afterwards to override it explicitly.
     pub fn with_profile(mut self, profile: Profile) -> Self {
         self.profile = profile;
         self.config.scan.profile = profile;
+        self.fail_on = self.config.fail_on();
         self
     }
 
+    /// No network: scanners run offline and no model provider is called.
     pub fn with_offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
@@ -131,13 +138,22 @@ pub struct ScanOutcome {
     pub stored_path: PathBuf,
     pub written: Vec<PathBuf>,
     pub fail_on: Severity,
+    /// A plugin that should have run did not finish (unavailable, failed, timed out).
     pub scanner_failures: bool,
+    /// CI with a base ref: only findings in these files trip the gate. `None` gates all.
+    pub gate_paths: Option<BTreeSet<String>>,
 }
 
 impl ScanOutcome {
-    /// Exit-relevant: actionable findings at or above the gate.
+    /// Exit-relevant: actionable findings at or above the gate, within the gated files.
     pub fn breaches_gate(&self) -> bool {
-        self.report.breaches(self.fail_on)
+        match &self.gate_paths {
+            None => self.report.breaches(self.fail_on),
+            Some(paths) => self.report.actionable().any(|f| {
+                f.severity() >= self.fail_on
+                    && paths.contains(f.finding.location.path.to_string_lossy().as_ref())
+            }),
+        }
     }
 }
 
@@ -184,12 +200,9 @@ pub async fn run_scan(options: ScanOptions) -> Result<ScanOutcome> {
 
     let plan = registry.plan(&config.plugins, &base_ctx);
     let (plugin_runs, raw_findings) = run_plugins(&plan, &config.plugins, &base_ctx).await;
-    let scanner_failures = plugin_runs.iter().any(|r| {
-        matches!(
-            r.status,
-            RunStatus::Failed { .. } | RunStatus::TimedOut { .. }
-        )
-    });
+    // Unavailable counts too: a runner without scanners must not pass as a clean scan.
+    // Skipped (not applicable, disabled) does not.
+    let scanner_failures = plugin_runs.iter().any(|r| r.status.degraded_coverage());
 
     // --- policy -------------------------------------------------------------
     let mut policy_findings = Vec::new();
@@ -201,7 +214,9 @@ pub async fn run_scan(options: ScanOptions) -> Result<ScanOutcome> {
         let policy_report = policy_registry.evaluate(graph, &detection)?;
         policy_packs = policy_report.packs_applied.clone();
         policy_nodes = policy_report.nodes_evaluated;
-        for outcome in &policy_report.outcomes {
+        // Violations only: a control satisfied on one node must not refute an
+        // unrelated hypothesis that happens to share the file.
+        for outcome in policy_report.violations() {
             extra_evidence.push(outcome.to_evidence());
         }
         policy_findings = from_policy_violations(policy_report.violations().cloned());
@@ -220,12 +235,21 @@ pub async fn run_scan(options: ScanOptions) -> Result<ScanOutcome> {
     apply_threshold(&mut hypotheses, threshold);
 
     // --- AI investigation ---------------------------------------------------
-    let ai_used = !options.no_ai && config.ai_enabled() && options.profile.allows_ai();
+    // `--offline` means no network at all, model providers included.
+    let ai_used = !options.no_ai
+        && !options.offline
+        && config.ai_enabled()
+        && options.profile.allows_ai();
     if ai_used {
         let provider = ai_from_config(&config.ai)?;
         let budget = Budget::from_config(&config.ai);
-        let cache_path = config.state_dir().join("investigation-cache.json");
-        let cache = InvestigationCache::load(&cache_path)?;
+        // In CI the on-disk cache is repository content and could be committed with
+        // pre-seeded verdicts, so start empty instead of trusting it.
+        let cache = if options.ci {
+            InvestigationCache::memory()
+        } else {
+            InvestigationCache::load(config.state_dir().join("investigation-cache.json"))?
+        };
         let mut investigator =
             Investigator::new(ProviderArc(provider), budget).with_cache(cache);
         let queue = investigation_queue(&hypotheses, threshold, config.max_investigations());
@@ -255,7 +279,7 @@ pub async fn run_scan(options: ScanOptions) -> Result<ScanOutcome> {
         findings,
         &hypotheses,
         reporting_threshold,
-        config.report.include_suppressed,
+        config.report.include_refuted,
     );
 
     apply_suppressions(&mut final_findings, &config.suppress);
@@ -328,6 +352,14 @@ pub async fn run_scan(options: ScanOptions) -> Result<ScanOutcome> {
     // silence unused if graph not further used
     let _ = graph;
 
+    // CI with a base ref gates on changed files only; everything is still reported.
+    let gate_paths = if options.ci {
+        effective_base_ref(options.base_ref.as_deref())
+            .and_then(|base| changed_files(&root, &base))
+    } else {
+        None
+    };
+
     Ok(ScanOutcome {
         report,
         hypotheses,
@@ -336,6 +368,7 @@ pub async fn run_scan(options: ScanOptions) -> Result<ScanOutcome> {
         written,
         fail_on: options.fail_on,
         scanner_failures,
+        gate_paths,
     })
 }
 
@@ -478,6 +511,22 @@ fn git_head(root: &std::path::Path) -> Option<String> {
 mod tests {
     use super::*;
     use quoll_core::config::Config;
+
+    #[test]
+    fn profile_moves_the_gate_unless_fail_on_is_explicit() {
+        let config = Config::default();
+        let deep = ScanOptions::from_config(&config).with_profile(Profile::Deep);
+        assert_eq!(deep.fail_on, Profile::Deep.fail_on());
+        let flag = ScanOptions::from_config(&config)
+            .with_profile(Profile::Deep)
+            .with_fail_on(Severity::Critical);
+        assert_eq!(flag.fail_on, Severity::Critical);
+
+        let mut config = Config::default();
+        config.scan.fail_on = Some(Severity::Low);
+        let configured = ScanOptions::from_config(&config).with_profile(Profile::Deep);
+        assert_eq!(configured.fail_on, Severity::Low);
+    }
 
     #[tokio::test]
     async fn scan_empty_repo_produces_empty_report() {

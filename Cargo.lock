@@ -1214,6 +1214,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "globset",
  "quoll-ai",
  "quoll-core",
  "quoll-detect",

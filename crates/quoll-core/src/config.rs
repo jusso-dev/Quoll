@@ -261,6 +261,8 @@ pub struct ReportConfig {
     pub output_dir: PathBuf,
     /// Include refuted and suppressed findings for auditability.
     pub include_suppressed: bool,
+    /// Include hypotheses the model rejected, as refuted findings.
+    pub include_refuted: bool,
     /// Path to a baseline file; findings present in it are reported as pre-existing.
     pub baseline: Option<PathBuf>,
 }
@@ -271,6 +273,7 @@ impl Default for ReportConfig {
             formats: vec!["markdown".to_string()],
             output_dir: PathBuf::from(STATE_DIR).join("reports"),
             include_suppressed: false,
+            include_refuted: false,
             baseline: None,
         }
     }

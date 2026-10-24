@@ -185,6 +185,9 @@ pub struct AttackHypothesis {
     pub location: Location,
     /// Every fact for and against.
     pub evidence: Vec<Evidence>,
+    /// CWEs carried by the scanner findings this hypothesis absorbed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cwe: Vec<String>,
     /// Route or entry point, when the graph identified one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_point: Option<String>,
@@ -219,6 +222,7 @@ impl AttackHypothesis {
             status: HypothesisStatus::Proposed,
             location,
             evidence,
+            cwe: Vec::new(),
             entry_point: None,
             attack_path: Vec::new(),
             open_questions: Vec::new(),
@@ -265,13 +269,29 @@ impl AttackHypothesis {
         };
         let hypothesis_id = self.id.clone();
         let description = self.narrative.clone();
-        let cwe: Vec<String> = self.class.cwe().iter().map(|s| s.to_string()).collect();
+        // Class CWEs first, then whatever the absorbed scanner findings carried, so an
+        // `Other` class still reports the tool's CWE.
+        let mut cwe: Vec<String> = self.class.cwe().iter().map(|s| s.to_string()).collect();
+        for item in self.cwe {
+            if !cwe.contains(&item) {
+                cwe.push(item);
+            }
+        }
+        // Identity is the (class, path) bucket, like the hypothesis id: independent of
+        // which member supplied the primary location, and of members joining or leaving.
+        let fingerprint = ids::finding_fingerprint(
+            &format!("hypothesis:{}", self.class.as_str()),
+            &self.location.path.to_string_lossy(),
+            "",
+        );
         let mut finding = crate::Finding::new(
             self.title,
             self.severity,
             self.location,
             self.evidence,
         );
+        finding.id = ids::stable_id("QLL", &[&fingerprint]);
+        finding.fingerprint = fingerprint;
         finding.description = description;
         finding.status = status;
         finding.cwe = cwe;
@@ -357,6 +377,24 @@ mod tests {
         assert_eq!(finding.cwe, vec!["CWE-89"]);
         assert_eq!(finding.evidence.len(), 2);
         assert!(finding.validate().is_ok());
+    }
+
+    #[test]
+    fn promotion_merges_member_cwes_and_keys_on_class_and_path() {
+        let mut a = AttackHypothesis::new(
+            HypothesisClass::Other("weak-hash".into()),
+            Location::at("src/db.rs", 12),
+            strong_evidence(),
+        );
+        a.cwe = vec!["CWE-328".into()];
+        let b = AttackHypothesis::new(
+            HypothesisClass::Other("weak-hash".into()),
+            Location::at("src/db.rs", 40).with_snippet("md5(x)"),
+            vec![],
+        );
+        let (a, b) = (a.into_finding(), b.into_finding());
+        assert_eq!(a.cwe, vec!["CWE-328"]);
+        assert_eq!(a.fingerprint, b.fingerprint);
     }
 
     #[test]
