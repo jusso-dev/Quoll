@@ -15,7 +15,8 @@ pub enum Exit {
     Ok = 0,
     /// Findings at or above the configured severity gate.
     FindingsThreshold = 1,
-    /// The configuration is invalid.
+    /// The configuration or the invocation is invalid: bad config, a missing path, an
+    /// unknown id, no previous scan.
     InvalidConfig = 2,
     /// An external scanner failed or timed out.
     ScannerFailed = 3,
@@ -46,6 +47,8 @@ impl Exit {
         match error {
             Error::Config(_) => Exit::InvalidConfig,
             Error::Parse { .. } => Exit::InvalidConfig,
+            // A user mistake, not a Quoll failure.
+            Error::NotFound(_) => Exit::InvalidConfig,
             Error::Graph(_) => Exit::GraphFailed,
             Error::Plugin { .. }
             | Error::PluginUnavailable { .. }
@@ -102,6 +105,12 @@ mod tests {
             binary: "semgrep".into(),
         };
         assert_eq!(Exit::from_error(&error), Exit::ScannerFailed);
+    }
+
+    #[test]
+    fn unknown_ids_are_usage_errors_not_internal_errors() {
+        let error = Error::not_found("no finding `F-9`");
+        assert_eq!(Exit::from_error(&error), Exit::InvalidConfig);
     }
 
     #[test]

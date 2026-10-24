@@ -54,7 +54,7 @@ pub fn run(context: &Context, args: &ExplainArgs) -> Result<Exit> {
         return Ok(Exit::Ok);
     }
 
-    Err(quoll_core::Error::other(format!(
+    Err(quoll_core::Error::not_found(format!(
         "no finding or hypothesis `{}` in the last scan",
         args.id
     )))

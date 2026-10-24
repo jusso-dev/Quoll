@@ -114,6 +114,7 @@ mod tests {
             printer: Printer::plain(),
             root: std::path::PathBuf::from("."),
             config_override: None,
+            trust_repo_config: false,
         }
     }
 

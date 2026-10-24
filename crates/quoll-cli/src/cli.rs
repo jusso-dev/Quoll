@@ -29,8 +29,19 @@ pub struct GlobalArgs {
     pub path: Option<PathBuf>,
 
     /// Configuration file. Defaults to the nearest `quoll.toml`.
+    ///
+    /// An explicit file is trusted. A discovered one is not: settings that run code or
+    /// send data (plugin binary/extra_args/env, AI provider command/args/base_url/
+    /// api_key_env, output paths outside the repository) are ignored.
     #[arg(long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Honour every setting in the repository's own `quoll.toml`.
+    ///
+    /// Only for repositories you trust; never for untrusted pull requests. Equivalent to
+    /// QUOLL_TRUST_REPO_CONFIG=1.
+    #[arg(long, global = true)]
+    pub trust_repo_config: bool,
 
     /// Suppress progress output. Results are still printed.
     #[arg(long, short, global = true)]
@@ -201,7 +212,8 @@ pub struct ValidateArgs {
     #[arg(long, value_name = "URL")]
     pub target_url: String,
 
-    /// Hypothesis to validate.
+    /// Hypothesis or finding id. Currently only checked to exist in the last scan; the
+    /// run itself is not yet focused on it.
     pub id: Option<String>,
 }
 
@@ -272,7 +284,8 @@ pub enum PolicyCommand {
 
 #[derive(Debug, Args)]
 pub struct McpArgs {
-    /// Serve over stdio. The only transport in this build.
+    /// Serve over stdio. Accepted for compatibility: stdio is currently the only
+    /// transport, so the server always uses it.
     #[arg(long, default_value_t = true)]
     pub stdio: bool,
 }
@@ -328,6 +341,14 @@ mod tests {
         let cli = Cli::try_parse_from(["quoll", "graph", "stats", "--quiet"]).unwrap();
         assert!(cli.global.quiet);
         assert_eq!(cli.command.name(), "graph");
+    }
+
+    #[test]
+    fn repository_config_is_untrusted_unless_asked() {
+        let cli = Cli::try_parse_from(["quoll", "ci"]).unwrap();
+        assert!(!cli.global.trust_repo_config);
+        let cli = Cli::try_parse_from(["quoll", "ci", "--trust-repo-config"]).unwrap();
+        assert!(cli.global.trust_repo_config);
     }
 
     #[test]

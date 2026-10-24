@@ -25,10 +25,10 @@ fn build(context: &Context, args: &GraphBuildArgs) -> Result<Exit> {
 
 fn index(context: &Context, rebuild: bool) -> Result<Exit> {
     let printer = &context.printer;
-    let config = context.config()?;
+    let config = context.config_for_writing()?;
     let path = config.graph_path();
 
-    printer.line(format!(
+    printer.progress(format!(
         "{} {}",
         if rebuild { "Building" } else { "Updating" },
         printer.dim(&config.root.display().to_string())
@@ -168,6 +168,7 @@ mod tests {
             printer: Printer::plain(),
             root: root.to_path_buf(),
             config_override: None,
+            trust_repo_config: false,
         }
     }
 

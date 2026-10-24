@@ -268,6 +268,7 @@ mod tests {
             printer: Printer::plain(),
             root: root.to_path_buf(),
             config_override: None,
+            trust_repo_config: false,
         }
     }
 

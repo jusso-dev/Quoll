@@ -11,10 +11,7 @@ use crate::exit::Exit;
 /// never drift out of step with what Quoll actually reads.
 pub fn run(context: &Context, args: &InitArgs) -> Result<Exit> {
     let printer = &context.printer;
-    let root = context
-        .root
-        .canonicalize()
-        .map_err(|e| Error::io(context.root.clone(), e))?;
+    let root = context.canonical_root()?;
     let target = root.join(CONFIG_FILE);
 
     if target.exists() && !args.force {
@@ -59,6 +56,7 @@ mod tests {
             printer: Printer::plain(),
             root: root.to_path_buf(),
             config_override: None,
+            trust_repo_config: false,
         }
     }
 

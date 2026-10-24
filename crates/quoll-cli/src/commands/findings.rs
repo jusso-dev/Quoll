@@ -54,7 +54,7 @@ fn show(context: &Context, id: &str) -> Result<Exit> {
     let config = context.config()?;
     let stored = load_last_scan(&config.state_dir())?;
     let finding = stored.finding(id).ok_or_else(|| {
-        quoll_core::Error::other(format!("no finding `{id}` in the last scan"))
+        quoll_core::Error::not_found(format!("no finding `{id}` in the last scan"))
     })?;
 
     printer.heading(&finding.title);

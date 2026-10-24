@@ -9,7 +9,8 @@ use crate::exit::Exit;
 
 pub async fn run(context: &Context, args: &ValidateArgs) -> Result<Exit> {
     let printer = &context.printer;
-    let config = context.config()?;
+    // strix writes its brief under `.quoll/work`.
+    let config = context.config_for_writing()?;
 
     let hosts = config
         .plugins
@@ -22,10 +23,11 @@ pub async fn run(context: &Context, args: &ValidateArgs) -> Result<Exit> {
         return Err(Error::DynamicValidation(refusal.to_string()));
     }
 
+    // The id is only checked to exist; the run is not yet focused on it (see --help).
     if let Some(id) = &args.id {
         if let Ok(stored) = load_last_scan(&config.state_dir()) {
             if stored.hypothesis(id).is_none() && stored.finding(id).is_none() {
-                return Err(Error::other(format!(
+                return Err(Error::not_found(format!(
                     "no hypothesis or finding `{id}` in the last scan"
                 )));
             }
@@ -50,7 +52,7 @@ pub async fn run(context: &Context, args: &ValidateArgs) -> Result<Exit> {
     let ctx = ScanContext::new(&config.root, Profile::Release)
         .with_target_url(Some(args.target_url.clone()));
 
-    printer.line(format!(
+    printer.progress(format!(
         "Validating against {} …",
         printer.dim(&args.target_url)
     ));

@@ -13,11 +13,11 @@
   <a href="#status"><img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache--2.0-blue" alt="Licence: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.82%2B-b7410e" alt="Rust 1.82+">
-  <img src="https://img.shields.io/badge/tests-387%20passing-brightgreen" alt="387 tests passing">
+  <img src="https://img.shields.io/badge/tests-passing-brightgreen" alt="Tests passing">
 </p>
 
 > The banner above shows the target state. `quoll scan`, policy evaluation and AI
-> investigation are not implemented yet — see [Status](#status) for what runs today.
+> investigation run today, with gaps — see [Status](#status) for exactly what works.
 
 ---
 
@@ -35,9 +35,8 @@ confidence threshold. It reasons about evidence Quoll gathered deterministically
 never the thing that decides a vulnerability exists.
 
 > **Status: pre-alpha.** The domain model, plugin contract, code graph, stack detection,
-> policy engine and CLI are implemented and tested. `quoll graph build` indexes a real
-> repository today; `quoll scan` does not exist yet. See [Status](#status) for exactly what
-> works.
+> policy engine and CLI are implemented and tested. `quoll scan` and `quoll ci` run the full
+> pipeline on a real repository today. See [Status](#status) for exactly what works.
 
 ---
 
@@ -151,8 +150,8 @@ calls. A repository with no qualifying hypotheses costs zero tokens.
 
 ## Status
 
-Pre-alpha. **All eleven crates are implemented**; **440 unit tests pass** and the workspace
-is clippy-clean.
+Pre-alpha. **All eleven crates are implemented**; the unit tests pass and the workspace is
+clippy-clean.
 
 | Crate | State | Contents |
 |---|---|---|
@@ -253,8 +252,8 @@ for route in graph.nodes_of_kind(NodeKind::Route)? {
 | `quoll explain` \| `findings` | **Works** — reads the last scan from `.quoll/last-scan.json` |
 | `quoll export` | **Works** — JSON / SARIF / Markdown from the last scan |
 | `quoll investigate` | **Works** when AI is configured (`--dry-run` always works) |
-| `quoll validate` | **Works** — target allowlist gate always runs; Strix when installed |
-| `quoll mcp` | **Works** — read-only MCP tools over stdio |
+| `quoll validate` | **Works** — target allowlist gate always runs; Strix when installed. An optional id is only checked to exist in the last scan; the run is not yet focused on it |
+| `quoll mcp` | **Works** — read-only MCP tools over stdio (the only transport; `--stdio` is accepted for compatibility) |
 
 Exit code `70` remains reserved for not-implemented commands; nothing in this build uses it.
 
@@ -266,17 +265,21 @@ These are a public interface. Values are fixed and are never reassigned.
 |---|---|
 | `0` | Policy passed |
 | `1` | Findings at or above the severity gate |
-| `2` | Invalid configuration |
+| `2` | Invalid configuration or usage: bad config, missing path, unknown id, no previous scan, unsafe state directory |
 | `3` | An external scanner failed or timed out |
 | `4` | Graph indexing failed |
 | `5` | A required model invocation failed |
 | `6` | A token, call or byte budget was exhausted |
 | `7` | Dynamic validation was requested against a forbidden target |
-| `70` | The command is not implemented in this build |
+| `70` | Reserved for not-implemented commands; unused in this build |
 | `71` | Internal error |
 
-Global flags — `-C/--path`, `--config`, `-q/--quiet`, `-v/--verbose`, `--no-color` — work
-before or after the subcommand. Logs go to stderr; stdout is reserved for results.
+When a scan both breaches the gate and loses a scanner, it exits `1`: findings are the
+actionable signal, and a broken scanner must not hide them behind `3`.
+
+Global flags — `-C/--path`, `--config`, `--trust-repo-config`, `-q/--quiet`,
+`-v/--verbose`, `--no-color` — work before or after the subcommand. Logs, warnings and
+progress go to stderr; stdout is reserved for results. `--quiet` suppresses progress only.
 `RUST_LOG` overrides `--verbose`.
 
 ---
@@ -405,22 +408,20 @@ path = ".quoll/graph.db"
 
 [ai]
 enabled = false            # off unless switched on; no keys, no network
+# provider = "openai"
+token_budget = 120000      # hard ceiling for a run
 
-[ai.models.investigator]
-provider = "openai"
+[ai.models]
+investigate = "gpt-5.6-sol-high"   # reasoning model for hypotheses
+report = "gpt-5.6-luna"            # cheap model for prose
 effort = "high"
-max_calls = 3
-max_input_tokens_total = 90000
-max_output_tokens_total = 18000
 
-[ai.models.reporter]
-effort = "low"
-max_calls = 12
-max_input_tokens_total = 50000
-max_output_tokens_total = 12000
+[ai.providers.openai]
+kind = "openai"
+api_key_env = "OPENAI_API_KEY"
 ```
 
-The investigator and reporter split is the point. A strong model reasons about whether a
+The `investigate` and `report` split is the point. A strong model reasons about whether a
 hypothesis is real; a cheap model writes the prose. The cheap model is never asked to
 decide whether a vulnerability exists, and cannot alter a verdict, a severity or a piece of
 evidence.
@@ -439,6 +440,18 @@ Quoll treats every repository it scans as hostile input. It must never:
 - persist API keys, or send secrets to a model;
 - run dynamic validation against a production target;
 - trust a model-generated source location without verifying it against the file on disk.
+
+The repository's own `quoll.toml` is part of that hostile input — in CI it may come from a
+fork's pull request. When the file is found by discovery, Quoll ignores (and warns about)
+every setting that would run code or send data elsewhere: plugin `binary`, `extra_args` and
+`env`; AI provider `command`, `args`, `base_url` and `api_key_env` (which also switches AI
+off); and `report.output_dir` or `graph.path` outside the repository. Those settings are
+honoured only from an explicit `--config <file>`, with `--trust-repo-config`, or with
+`QUOLL_TRUST_REPO_CONFIG=1`. Never grant that trust to untrusted pull requests.
+
+Likewise `.quoll/` lives in the repository, so commands that write state refuse to run
+(exit `2`) if the state directory, anything inside it, the report directory or the graph
+file is a symlink.
 
 Every subprocess has a timeout, and its process tree is killed when that timeout fires.
 These are not aspirations: the containment check, the symlink refusal, the timeout kill and
@@ -460,7 +473,7 @@ cargo clippy --workspace --all-targets
 cargo install --path crates/quoll-cli
 ```
 
-Expect 387 passing unit tests and no clippy warnings. The tests need no network access and
+Expect every unit test to pass and no clippy warnings. The tests need no network access and
 no API key.
 
 ---

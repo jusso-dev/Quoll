@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use quoll_core::config::Config;
+use quoll_core::config::{trust_granted_by_env, Config};
 use quoll_core::{Error, Result, Severity};
 use quoll_engine::load_last_scan;
 use quoll_graph::{Graph, GraphOps};
@@ -77,7 +77,8 @@ pub fn catalogue() -> Vec<ToolSpec> {
 }
 
 pub fn call(root: &Path, name: &str, arguments: &Value) -> Result<Value> {
-    let config = Config::discover(root)?;
+    // Same trust rule as the CLI: the repository's own quoll.toml is untrusted.
+    let config = Config::discover_with_trust(root, trust_granted_by_env())?;
     match name {
         "quoll_findings_list" => findings_list(&config, arguments),
         "quoll_finding_show" => finding_show(&config, arguments),
@@ -125,7 +126,7 @@ fn finding_show(config: &Config, args: &Value) -> Result<Value> {
     let stored = load_last_scan(&config.state_dir())?;
     let finding = stored
         .finding(id)
-        .ok_or_else(|| Error::other(format!("no finding `{id}`")))?;
+        .ok_or_else(|| Error::not_found(format!("no finding `{id}`")))?;
     Ok(serde_json::to_value(finding)?)
 }
 
@@ -212,7 +213,7 @@ fn explain(config: &Config, args: &Value) -> Result<Value> {
             })).collect::<Vec<_>>(),
         }));
     }
-    Err(Error::other(format!(
+    Err(Error::not_found(format!(
         "no finding or hypothesis `{id}` in the last scan"
     )))
 }

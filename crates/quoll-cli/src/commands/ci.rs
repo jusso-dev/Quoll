@@ -8,7 +8,7 @@ use crate::exit::Exit;
 
 pub async fn run(context: &Context, args: &CiArgs) -> Result<Exit> {
     let printer = &context.printer;
-    let config = context.config()?;
+    let config = context.config_for_writing()?;
 
     let mut options = ScanOptions::from_config(&config)
         .with_ci(true)
@@ -32,7 +32,7 @@ pub async fn run(context: &Context, args: &CiArgs) -> Result<Exit> {
     // Fail-on stays at config/profile default; CI is non-interactive.
     let _fail: Severity = options.fail_on;
 
-    printer.line(format!(
+    printer.progress(format!(
         "CI scan {} ({})",
         printer.dim(&options.config.root.display().to_string()),
         options.profile.as_str()
@@ -40,12 +40,8 @@ pub async fn run(context: &Context, args: &CiArgs) -> Result<Exit> {
 
     let outcome = run_scan(options).await?;
     crate::commands::scan::print_outcome(context, &outcome);
-
-    if outcome.scanner_failures {
-        return Ok(Exit::ScannerFailed);
-    }
-    if outcome.breaches_gate() {
-        return Ok(Exit::FindingsThreshold);
-    }
-    Ok(Exit::Ok)
+    Ok(crate::commands::scan::outcome_exit(
+        outcome.breaches_gate(),
+        outcome.scanner_failures,
+    ))
 }

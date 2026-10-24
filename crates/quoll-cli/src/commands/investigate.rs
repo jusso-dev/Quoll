@@ -8,7 +8,7 @@ use crate::exit::Exit;
 
 pub async fn run(context: &Context, args: &InvestigateArgs) -> Result<Exit> {
     let printer = &context.printer;
-    let config = context.config()?;
+    let config = context.config_for_writing()?;
     let mut stored = load_last_scan(&config.state_dir())?;
 
     let targets: Vec<_> = match &args.id {
@@ -16,7 +16,7 @@ pub async fn run(context: &Context, args: &InvestigateArgs) -> Result<Exit> {
             let hyp = stored
                 .hypothesis(id)
                 .cloned()
-                .ok_or_else(|| Error::other(format!("no hypothesis `{id}`")))?;
+                .ok_or_else(|| Error::not_found(format!("no hypothesis `{id}`")))?;
             vec![hyp]
         }
         None => stored
@@ -59,8 +59,9 @@ pub async fn run(context: &Context, args: &InvestigateArgs) -> Result<Exit> {
         Investigator::new(DynProvider(provider), Budget::from_config(&config.ai)).with_cache(cache);
     let provider_id = investigator.provider_id().to_string();
 
+    let mut result = Ok(Exit::Ok);
     for hyp in targets {
-        printer.line(format!("Investigating {} …", hyp.id));
+        printer.progress(format!("Investigating {} …", hyp.id));
         match investigator.investigate(&hyp).await {
             Ok(verdict) => {
                 if let Some(slot) = stored.hypotheses.iter_mut().find(|h| h.id == hyp.id) {
@@ -75,14 +76,22 @@ pub async fn run(context: &Context, args: &InvestigateArgs) -> Result<Exit> {
             }
             Err(Error::Budget(msg)) => {
                 printer.warn(msg);
-                return Ok(Exit::BudgetExceeded);
+                result = Ok(Exit::BudgetExceeded);
+                break;
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                result = Err(err);
+                break;
+            }
         }
     }
+    // Persist before reporting how the run ended: verdicts already paid for must survive
+    // a budget stop or a later failure.
     let _ = investigator.cache().save();
-    save_last_scan(&config.state_dir(), &stored)?;
-    Ok(Exit::Ok)
+    let saved = save_last_scan(&config.state_dir(), &stored);
+    let exit = result?;
+    saved?;
+    Ok(exit)
 }
 
 struct DynProvider(std::sync::Arc<dyn Provider>);

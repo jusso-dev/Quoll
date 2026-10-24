@@ -59,6 +59,10 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// Something the user named does not exist: an id, a previous scan, a path.
+    #[error("{0}")]
+    NotFound(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -87,6 +91,10 @@ impl Error {
 
     pub fn config(message: impl std::fmt::Display) -> Self {
         Error::Config(message.to_string())
+    }
+
+    pub fn not_found(message: impl std::fmt::Display) -> Self {
+        Error::NotFound(message.to_string())
     }
 
     pub fn other(message: impl std::fmt::Display) -> Self {

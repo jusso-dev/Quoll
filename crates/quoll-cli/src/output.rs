@@ -58,18 +58,21 @@ impl Printer {
 
     /// A section heading.
     pub fn heading(&self, text: &str) {
-        if self.quiet {
-            return;
-        }
         println!("\n{}", self.bold(text));
     }
 
-    /// Ordinary output. Suppressed by `--quiet`.
+    /// Ordinary output: results. Never suppressed.
     pub fn line(&self, text: impl AsRef<str>) {
+        println!("{}", text.as_ref());
+    }
+
+    /// A progress banner such as "Scanning …". Goes to stderr so stdout stays results
+    /// only, and is the one thing `--quiet` suppresses.
+    pub fn progress(&self, text: impl AsRef<str>) {
         if self.quiet {
             return;
         }
-        println!("{}", text.as_ref());
+        eprintln!("{}", text.as_ref());
     }
 
     /// A `label: value` row, aligned to a fixed label width.
@@ -82,9 +85,9 @@ impl Printer {
         self.line(format!("{} {}", self.green("✓"), text.as_ref()));
     }
 
-    /// Something is missing but the command still succeeded.
+    /// Something is missing but the command still succeeded. Goes to stderr, like errors.
     pub fn warn(&self, text: impl AsRef<str>) {
-        self.line(format!("{} {}", self.yellow("!"), text.as_ref()));
+        eprintln!("{} {}", self.yellow("!"), text.as_ref());
     }
 
     /// An error. Goes to stderr so that piped stdout stays machine-readable.
